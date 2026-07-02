@@ -2,10 +2,11 @@
 ⚓ Gemi Personeli Nitelik Belgesi Takip Sistemi
 ================================================
 Yazar      : Claude (Anthropic)
-Versiyon   : 1.2.0
+Versiyon   : 1.3.0
 Açıklama   : Personele ait nitelik belgelerinin bitiş tarihlerini izler,
              cari ay içinde süresi dolacak evrakları dinamik uyarılarla
              ve filtrelenebilir tablolarla kullanıcıya sunar.
+             ** Yeni: Ünvan atamaları JSON dosyasına kaydedilir, kalıcıdır. **
 Bağımlılıklar: streamlit, pandas, openpyxl, xlrd
 """
 
@@ -14,6 +15,31 @@ import pandas as pd
 import datetime
 import calendar
 import io
+import json
+import os
+
+# ──────────────────────────────────────────────────────────────────────────────
+# ÜNVAN KALICILIĞI İÇİN JSON DOSYA YOLU
+# ──────────────────────────────────────────────────────────────────────────────
+SAVE_FILE = "unvan_atamalari.json"
+
+def load_unvan_map():
+    """Diskten ünvan haritasını yükler, hata durumunda boş döner."""
+    if os.path.exists(SAVE_FILE):
+        try:
+            with open(SAVE_FILE, "r", encoding="utf-8") as f:
+                return json.load(f)
+        except (json.JSONDecodeError, IOError):
+            return {}
+    return {}
+
+def save_unvan_map(unvan_map):
+    """Ünvan haritasını diske kaydeder."""
+    try:
+        with open(SAVE_FILE, "w", encoding="utf-8") as f:
+            json.dump(unvan_map, f, ensure_ascii=False, indent=2)
+    except IOError:
+        pass  # Dosya yazılamazsa sessizce geç
 
 # ──────────────────────────────────────────────────────────────────────────────
 # SAYFA YAPLANDIRMASI (en üste yazılmalı — herhangi bir st. çağrısından önce)
@@ -507,7 +533,7 @@ with st.sidebar:
     st.markdown("---")
     st.markdown(
         "<div style='font-size:0.72rem;color:#4A7FA5;text-align:center;'>"
-        "v1.2 · Nitelik Belgesi Takip Sistemi<br>"
+        "v1.3 · Nitelik Belgesi Takip Sistemi<br>"
         "Streamlit + pandas"
         "</div>",
         unsafe_allow_html=True,
@@ -598,15 +624,15 @@ df = compute_remaining_days(df)
 # Durum etiketi ekle
 df["Durum"] = df["Kalan Gün"].apply(get_status_label)
 
-# ── Ünvan atamaları (session_state'ten) ──────────────────────────────────────
+# ── Ünvan atamaları (kalıcı depolama) ────────────────────────────────────────
 # Benzersiz personel listesi
 personel_listesi = sorted(df["Adı Soyadı"].dropna().unique().tolist())
 
-# session_state başlat
+# session_state başlat: eğer yoksa önce diskten yükle
 if "unvan_map" not in st.session_state:
-    st.session_state["unvan_map"] = {}
+    st.session_state["unvan_map"] = load_unvan_map()
 
-# Her personele atanmış ünvanı sütun olarak ekle
+# Her personele atanmış ünvanı sütun olarak ekle (geçici)
 def get_unvan(ad):
     return st.session_state["unvan_map"].get(ad, "— Atanmadı —")
 
@@ -641,7 +667,8 @@ with st.expander(
 ):
     st.markdown(
         "<div style='font-size:0.85rem;color:#8BAEC8;margin-bottom:14px;'>"
-        "Her personel için doğru ünvanı seçin. Değişiklikler anında tabloya yansır."
+        "Her personel için doğru ünvanı seçin. Değişiklikler anında tabloya yansır "
+        "ve otomatik olarak kaydedilir (sayfa yenilense bile kalır)."
         "</div>",
         unsafe_allow_html=True,
     )
@@ -655,7 +682,6 @@ with st.expander(
             key="bulk_unvan_sel",
         )
     with ca2:
-        # Sadece atanmamışlara veya hepsine uygula
         bulk_target = st.selectbox(
             "Kimlere?",
             ["Atanmamış olanlara", "Tüm personele"],
@@ -669,6 +695,8 @@ with st.expander(
                     mevcut = st.session_state["unvan_map"].get(p, "— Atanmadı —")
                     if bulk_target == "Tüm personele" or mevcut == "— Atanmadı —":
                         st.session_state["unvan_map"][p] = bulk_unvan
+                # Değişikliği hemen kaydet
+                save_unvan_map(st.session_state["unvan_map"])
                 st.rerun()
 
     st.markdown("---")
@@ -682,11 +710,18 @@ with st.expander(
             with col:
                 mevcut = st.session_state["unvan_map"].get(personel, "— Atanmadı —")
                 idx = UNVAN_LISTESI.index(mevcut) if mevcut in UNVAN_LISTESI else 0
+                # on_change callback ile her seçimde kaydet
+                def make_callback(p):
+                    def callback():
+                        # Selectbox değiştiğinde çalışır; value zaten güncellenmiş olur
+                        save_unvan_map(st.session_state["unvan_map"])
+                    return callback
                 secim = col.selectbox(
                     label=personel,
                     options=UNVAN_LISTESI,
                     index=idx,
                     key=f"unvan_{personel}",
+                    on_change=make_callback(personel)
                 )
                 if secim != st.session_state["unvan_map"].get(personel):
                     st.session_state["unvan_map"][personel] = secim
@@ -695,12 +730,16 @@ with st.expander(
     # Sıfırla butonu
     if st.button("🗑 Tüm ünvan atamalarını sıfırla", key="reset_unvanlar"):
         st.session_state["unvan_map"] = {}
+        save_unvan_map(st.session_state["unvan_map"])
         st.rerun()
 
-# Ünvan ataması yapılmış personeli df'e yansıt
+# Ünvan ataması yapılmış personeli df'e yansıt (genişletme sonrası güncelle)
 df["Ünvan"] = df["Adı Soyadı"].apply(get_unvan)
 df_month["Ünvan"] = df_month["Adı Soyadı"].apply(get_unvan)
 df_display["Ünvan"] = df_display["Adı Soyadı"].apply(get_unvan)
+
+# ── ÜNVAN HARİTASINI DİSKE KAYDET (her etkileşim sonrası güncel) ──
+save_unvan_map(st.session_state["unvan_map"])
 
 st.markdown("<br>", unsafe_allow_html=True)
 
