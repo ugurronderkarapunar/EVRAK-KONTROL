@@ -1,202 +1,733 @@
 """
-Gemi / Personel Ehliyet ve Evrak Takip Uygulaması
--------------------------------------------------
-Bu uygulama, yüklenen Excel dosyasındaki personel evraklarının
-bitiş tarihlerini analiz ederek, içinde bulunulan ay içinde
-süresi dolacak kritik belgeleri vurgular.
+⚓ Gemi Personeli Nitelik Belgesi Takip Sistemi
+================================================
+Yazar      : Claude (Anthropic)
+Versiyon   : 1.0.0
+Açıklama   : Personele ait nitelik belgelerinin bitiş tarihlerini izler,
+             cari ay içinde süresi dolacak evrakları dinamik uyarılarla
+             ve filtrelenebilir tablolarla kullanıcıya sunar.
+Bağımlılıklar: streamlit, pandas, openpyxl, xlrd
 """
 
 import streamlit as st
 import pandas as pd
-import numpy as np
-from datetime import date, datetime
+import datetime
 import calendar
+import io
 
-# ----------------------------- Sayfa Yapılandırması -----------------------------
+# ──────────────────────────────────────────────────────────────────────────────
+# SAYFA YAPLANDIRMASI (en üste yazılmalı — herhangi bir st. çağrısından önce)
+# ──────────────────────────────────────────────────────────────────────────────
 st.set_page_config(
-    page_title="Evrak Takip Sistemi",
-    page_icon="🚢",
+    page_title="Belge Takip Sistemi",
+    page_icon="⚓",
     layout="wide",
-    initial_sidebar_state="expanded"
+    initial_sidebar_state="expanded",
 )
 
-# ----------------------------- Yardımcı Fonksiyonlar -----------------------------
-@st.cache_data
-def load_excel(file):
+# ──────────────────────────────────────────────────────────────────────────────
+# ÖZEL CSS — Denizcilik teması: lacivert / altın / çelik grisi palet
+# ──────────────────────────────────────────────────────────────────────────────
+st.markdown("""
+<style>
+/* ---------- Google Fonts ---------- */
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Syne:wght@700;800&display=swap');
+
+/* ---------- Genel arka plan ---------- */
+html, body, [data-testid="stAppViewContainer"] {
+    background: #0B1929 !important;
+    color: #E8EDF3 !important;
+    font-family: 'Inter', sans-serif !important;
+}
+
+[data-testid="stSidebar"] {
+    background: #0D2137 !important;
+    border-right: 1px solid #1E3A52 !important;
+}
+
+/* ---------- Başlık bloğu ---------- */
+.hero-block {
+    background: linear-gradient(135deg, #0D2137 0%, #1A3A5C 60%, #0D2137 100%);
+    border: 1px solid #2A5280;
+    border-radius: 16px;
+    padding: 36px 40px 28px 40px;
+    margin-bottom: 28px;
+    position: relative;
+    overflow: hidden;
+}
+.hero-block::before {
+    content: "⚓";
+    position: absolute;
+    right: 32px;
+    top: 50%;
+    transform: translateY(-50%);
+    font-size: 96px;
+    opacity: 0.06;
+    pointer-events: none;
+}
+.hero-title {
+    font-family: 'Syne', sans-serif;
+    font-size: 2.1rem;
+    font-weight: 800;
+    color: #F0C040;
+    letter-spacing: -0.5px;
+    margin: 0 0 6px 0;
+    line-height: 1.15;
+}
+.hero-sub {
+    font-size: 0.95rem;
+    color: #8BAEC8;
+    margin: 0;
+    max-width: 620px;
+}
+
+/* ---------- Metrik kartları ---------- */
+[data-testid="metric-container"] {
+    background: #112236 !important;
+    border: 1px solid #1E3A52 !important;
+    border-radius: 12px !important;
+    padding: 18px 22px !important;
+}
+[data-testid="metric-container"] label {
+    color: #8BAEC8 !important;
+    font-size: 0.78rem !important;
+    letter-spacing: 0.04em !important;
+    text-transform: uppercase !important;
+}
+[data-testid="metric-container"] [data-testid="stMetricValue"] {
+    color: #F0C040 !important;
+    font-family: 'Syne', sans-serif !important;
+    font-size: 2rem !important;
+}
+[data-testid="metric-container"] [data-testid="stMetricDelta"] {
+    font-size: 0.78rem !important;
+}
+
+/* ---------- Uyarı kutusu (custom) ---------- */
+.alert-critical {
+    background: linear-gradient(90deg, #3D0B0B, #1C0B0B);
+    border-left: 5px solid #E74C3C;
+    border-radius: 10px;
+    padding: 18px 22px;
+    margin-bottom: 20px;
+    color: #FADADD;
+    font-size: 0.97rem;
+}
+.alert-warning {
+    background: linear-gradient(90deg, #3D2200, #1C1100);
+    border-left: 5px solid #F39C12;
+    border-radius: 10px;
+    padding: 18px 22px;
+    margin-bottom: 20px;
+    color: #FDEBD0;
+    font-size: 0.97rem;
+}
+.alert-ok {
+    background: linear-gradient(90deg, #0B2D1A, #061A0E);
+    border-left: 5px solid #2ECC71;
+    border-radius: 10px;
+    padding: 18px 22px;
+    margin-bottom: 20px;
+    color: #D5F5E3;
+    font-size: 0.97rem;
+}
+.alert-info {
+    background: linear-gradient(90deg, #0B1E30, #061018);
+    border-left: 5px solid #3498DB;
+    border-radius: 10px;
+    padding: 18px 22px;
+    margin-bottom: 20px;
+    color: #D6EAF8;
+    font-size: 0.97rem;
+}
+
+/* ---------- Bölüm başlıkları ---------- */
+.section-label {
+    font-size: 0.72rem;
+    font-weight: 600;
+    letter-spacing: 0.12em;
+    text-transform: uppercase;
+    color: #4A7FA5;
+    margin-bottom: 12px;
+    border-bottom: 1px solid #1E3A52;
+    padding-bottom: 6px;
+}
+
+/* ---------- Filtre satırı ---------- */
+.filter-row {
+    background: #112236;
+    border: 1px solid #1E3A52;
+    border-radius: 12px;
+    padding: 16px 20px;
+    margin-bottom: 20px;
+}
+
+/* ---------- Sidebar etiketleri ---------- */
+[data-testid="stSidebar"] label {
+    color: #8BAEC8 !important;
+    font-size: 0.82rem !important;
+    font-weight: 500 !important;
+}
+[data-testid="stSidebar"] .stFileUploader {
+    background: #112236 !important;
+    border: 1px dashed #2A5280 !important;
+    border-radius: 10px !important;
+}
+
+/* ---------- Tablo ---------- */
+[data-testid="stDataFrame"] {
+    border: 1px solid #1E3A52 !important;
+    border-radius: 12px !important;
+    overflow: hidden !important;
+}
+
+/* ---------- İnce çizgi ayırıcı ---------- */
+hr { border-color: #1E3A52 !important; }
+
+/* ---------- Streamlit buton ---------- */
+.stButton > button {
+    background: #1A3A5C;
+    color: #F0C040;
+    border: 1px solid #2A5280;
+    border-radius: 8px;
+    font-weight: 600;
+    padding: 6px 18px;
+}
+.stButton > button:hover {
+    background: #2A5280;
+    color: #FFD966;
+    border-color: #4A7FA5;
+}
+</style>
+""", unsafe_allow_html=True)
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# YARDIMCI FONKSİYONLAR
+# ──────────────────────────────────────────────────────────────────────────────
+
+def get_current_month_range() -> tuple[datetime.date, datetime.date]:
+    """Bugünün ayının ilk ve son gününü döndürür."""
+    today = datetime.date.today()
+    first_day = today.replace(day=1)
+    last_day_num = calendar.monthrange(today.year, today.month)[1]
+    last_day = today.replace(day=last_day_num)
+    return first_day, last_day
+
+
+def load_excel(file) -> pd.DataFrame | None:
     """
-    Yüklenen Excel dosyasını akıllıca okur. 
-    Önce modern .xlsx (openpyxl) dener, 'zip file' hatası alırsa eski tip .xls (xlrd) dener.
+    Yüklenen Excel dosyasını okur.
+    Hem .xlsx hem .xls formatını destekler.
+    Beklenen sütunlar: Adı Soyadı, Sicil No, Evrak Adı, Başlangıç Tarihi, Bitiş Tarihi
     """
     try:
-        # Önce modern .xlsx formatını zorla
-        df = pd.read_excel(file, engine='openpyxl')
+        # Dosya uzantısına göre engine seç
+        filename = file.name.lower()
+        if filename.endswith(".xls"):
+            df = pd.read_excel(file, engine="xlrd")
+        else:
+            df = pd.read_excel(file, engine="openpyxl")
         return df
     except Exception as e:
-        # Eğer zip hatası aldıysa, büyük ihtimalle eski format bir .xls dosyasıdır
-        if "File is not a zip file" in str(e):
-            try:
-                # Dosya imlecini tekrar başa sarıp xlrd motorunu deniyoruz
-                file.seek(0)
-                df = pd.read_excel(file, engine='xlrd')
-                return df
-            except Exception as xlrd_error:
-                st.error("Excel formatı çözülemedi. Dosyanız eski tip (.xls) bir Excel ise lütfen terminalden 'pip install xlrd' komutunu çalıştırın.")
-                return None
-        else:
-            st.error(f"Excel dosyası okunurken hata oluştu: {e}")
-            st.info("Lütfen yüklediğiniz dosyanın gerçekten geçerli bir Excel dosyası olduğundan emin olun.")
-            return None
+        st.error(f"Dosya okunurken hata oluştu: {e}")
+        return None
 
-def validate_columns(df, required_cols):
-    """Gerekli sütunların DataFrame'de olup olmadığını kontrol eder."""
-    missing = [col for col in required_cols if col not in df.columns]
+
+def normalize_columns(df: pd.DataFrame) -> pd.DataFrame | None:
+    """
+    Sütun adlarını standartlaştırır.
+    Boşluk, büyük/küçük harf ve Türkçe karakter farklarını tolere eder.
+    """
+    # Normalize helper
+    def norm(s):
+        return (str(s).strip().lower()
+                .replace("ı", "i").replace("ğ", "g")
+                .replace("ü", "u").replace("ş", "s")
+                .replace("ö", "o").replace("ç", "c")
+                .replace(" ", ""))
+
+    col_map = {
+        "adisoyadı": "Adı Soyadı",
+        "adsoyad": "Adı Soyadı",
+        "ad": "Adı Soyadı",
+        "sicilno": "Sicil No",
+        "sicil": "Sicil No",
+        "evrakadi": "Evrak Adı",
+        "nitelikbelgesi": "Evrak Adı",
+        "nitelik": "Evrak Adı",
+        "belge": "Evrak Adı",
+        "baslangiçtarihi": "Başlangıç Tarihi",
+        "baslangiç": "Başlangıç Tarihi",
+        "baslangictarihi": "Başlangıç Tarihi",
+        "bitistarihi": "Bitiş Tarihi",
+        "bitiştarihi": "Bitiş Tarihi",
+        "bitis": "Bitiş Tarihi",
+        "bitiş": "Bitiş Tarihi",
+    }
+
+    renamed = {}
+    for col in df.columns:
+        key = norm(col)
+        if key in col_map:
+            renamed[col] = col_map[key]
+
+    df = df.rename(columns=renamed)
+
+    required = ["Adı Soyadı", "Evrak Adı", "Bitiş Tarihi"]
+    missing = [c for c in required if c not in df.columns]
     if missing:
-        st.error(f"Excel dosyasında şu zorunlu sütunlar eksik: {', '.join(missing)}")
-        st.info("Beklenen sütunlar: Adı Soyadı, Sicil No, Evrak Adı, Başlangıç Tarihi, Bitiş Tarihi")
-        return False
-    return True
+        st.error(
+            f"Excel dosyasında şu zorunlu sütunlar bulunamadı: **{', '.join(missing)}**\n\n"
+            "Lütfen sütun adlarını kontrol edin. Beklenen sütunlar: "
+            "**Adı Soyadı, Sicil No, Evrak Adı, Başlangıç Tarihi, Bitiş Tarihi**"
+        )
+        return None
 
-def prepare_data(df):
-    """Tarih sütunlarını dönüştürür, geçersiz değerleri temizler."""
-    df = df.copy()
-    # Bitiş Tarihi'ni datetime formatına çevir, hataları NaT yap
-    df['Bitiş Tarihi'] = pd.to_datetime(df['Bitiş Tarihi'], dayfirst=True, errors='coerce')
-    # Başlangıç Tarihi'ni de dönüştürelim
-    df['Başlangıç Tarihi'] = pd.to_datetime(df['Başlangıç Tarihi'], dayfirst=True, errors='coerce')
-    # Geçerli tarih olmayan satırları temizle
-    df = df.dropna(subset=['Bitiş Tarihi']).reset_index(drop=True)
+    # Eksik isteğe bağlı sütunları ekle
+    for opt in ["Sicil No", "Başlangıç Tarihi"]:
+        if opt not in df.columns:
+            df[opt] = "-"
+
     return df
 
-def filter_current_month(df):
-    """Sadece içinde bulunulan aya ait bitiş tarihlerini filtreler."""
-    today = date.today()
-    first_day = date(today.year, today.month, 1)
-    last_day = date(today.year, today.month, calendar.monthrange(today.year, today.month)[1])
-    
-    # Filtre: Bitiş Tarihi bu ay içinde (ilk ve son gün dahil)
-    mask = (df['Bitiş Tarihi'].dt.date >= first_day) & (df['Bitiş Tarihi'].dt.date <= last_day)
-    return df[mask].copy(), first_day, last_day
 
-# ----------------------------- Arayüz: Üst Bilgi -----------------------------
-st.title("🚢 Gemi / Personel Evrak Takip Paneli")
-st.markdown("""
-Bu uygulama, personelinizin ehliyet, sertifika ve diğer evraklarının **geçerlilik sürelerini** 
-takip etmenizi sağlar. Sol panelden Excel dosyanızı yükleyin, personel ünvanını girin;
-sistem **bu ay içinde süresi dolacak** tüm evrakları otomatik olarak listelesin.
-""")
+def parse_dates(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    'Bitiş Tarihi' ve 'Başlangıç Tarihi' sütunlarını datetime.date tipine dönüştürür.
+    Hatalı değerleri NaT olarak işaretler (errors='coerce').
+    """
+    for col in ["Bitiş Tarihi", "Başlangıç Tarihi"]:
+        if col in df.columns:
+            df[col] = pd.to_datetime(df[col], errors="coerce", dayfirst=True).dt.date
+    return df
 
-# ----------------------------- Kenar Çubuğu (Sidebar) -----------------------------
-with st.sidebar:
-    st.header("📁 Veri Yükleme ve Ayarlar")
-    
-    # Excel dosya yükleyici
-    uploaded_file = st.file_uploader(
-        "Personel evrak listesi (Excel)",
-        type=["xlsx", "xls"],
-        help="'Adı Soyadı', 'Sicil No', 'Evrak Adı', 'Başlangıç Tarihi', 'Bitiş Tarihi' sütunlarını içermelidir."
+
+def compute_remaining_days(df: pd.DataFrame) -> pd.DataFrame:
+    """'Bitiş Tarihi' ile bugün arasındaki gün farkını hesaplar."""
+    today = datetime.date.today()
+    df["Kalan Gün"] = df["Bitiş Tarihi"].apply(
+        lambda d: (d - today).days if pd.notna(d) else None
     )
-    
-    st.divider()
-    
-    # Personel Ünvanı seçimi
-    st.subheader("👤 Personel Ünvanı")
-    unvan_options = [
-        "Seçiniz",
-        "Kaptan",
-        "Başmühendis",
-        "İkinci Kaptan",
-        "İkinci Mühendis",
-        "Güverte Lostromosu",
-        "Yağcı",
-        "Aşçı",
-        "Diğer (Manuel)"
-    ]
-    unvan_secim = st.selectbox("Ünvan seçiniz", unvan_options)
-    
-    # Manuel giriş alanı
-    if unvan_secim == "Diğer (Manuel)":
-        custom_unvan = st.text_input("Ünvanı yazınız", value="", placeholder="Örn: Elektrik Zabiti")
-        final_unvan = custom_unvan.strip() if custom_unvan.strip() else "Belirtilmedi"
-    elif unvan_secim == "Seçiniz":
-        final_unvan = "Belirtilmedi"  # Tabloda boş kalmaması için varsayılan atandı
-    else:
-        final_unvan = unvan_secim
+    return df
 
-# ----------------------------- Ana Panel -----------------------------
+
+def get_status_label(days) -> str:
+    """Kalan güne göre Türkçe durum etiketi döndürür."""
+    if days is None:
+        return "⚪ Bilinmiyor"
+    if days < 0:
+        return "🔴 Süresi Dolmuş"
+    if days <= 7:
+        return "🟠 Bu Hafta Bitiyor"
+    if days <= 31:
+        return "🟡 Bu Ay Bitiyor"
+    return "🟢 Geçerli"
+
+
+def filter_current_month(df: pd.DataFrame) -> pd.DataFrame:
+    """Cari ay içinde süresi dolan kayıtları filtreler."""
+    first_day, last_day = get_current_month_range()
+    mask = df["Bitiş Tarihi"].apply(
+        lambda d: pd.notna(d) and first_day <= d <= last_day
+    )
+    return df[mask].copy()
+
+
+def make_download_excel(df: pd.DataFrame) -> bytes:
+    """DataFrame'i indirilebilir Excel dosyasına dönüştürür."""
+    output = io.BytesIO()
+    with pd.ExcelWriter(output, engine="openpyxl") as writer:
+        df.to_excel(writer, index=False, sheet_name="Kritik Evraklar")
+    return output.getvalue()
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# SIDEBAR
+# ──────────────────────────────────────────────────────────────────────────────
+
+with st.sidebar:
+    st.markdown(
+        "<div style='font-family:Syne,sans-serif;font-size:1.25rem;"
+        "font-weight:800;color:#F0C040;padding:8px 0 18px 0;letter-spacing:-0.3px;'>"
+        "⚓ Belge Takip</div>",
+        unsafe_allow_html=True,
+    )
+
+    # — Dosya yükleyici
+    st.markdown("<div class='section-label'>📂 Veri Kaynağı</div>", unsafe_allow_html=True)
+    uploaded_file = st.file_uploader(
+        label="Excel dosyasını buraya sürükleyin",
+        type=["xlsx", "xls"],
+        help="Beklenen sütunlar: Adı Soyadı, Sicil No, Evrak Adı, Başlangıç Tarihi, Bitiş Tarihi",
+    )
+
+    st.markdown("<br>", unsafe_allow_html=True)
+
+    # — Ünvan seçimi (manuel giriş)
+    st.markdown("<div class='section-label'>👤 Personel Ünvanı</div>", unsafe_allow_html=True)
+    UNVAN_LISTESI = [
+        "(Hepsi)",
+        "Kaptan",
+        "Baş Zabiti",
+        "İkinci Zabiti",
+        "Üçüncü Zabiti",
+        "Başmakinist",
+        "İkinci Makinist",
+        "Üçüncü Makinist",
+        "Seyir Zabiti",
+        "Elektrik Zabiti",
+        "Güverte Tayfası",
+        "Makine Tayfası",
+        "Aşçı",
+        "Gemici",
+        "Diğer",
+    ]
+    selected_unvan = st.selectbox(
+        "Ünvana göre filtrele",
+        options=UNVAN_LISTESI,
+        index=0,
+        help="Tabloyu seçili ünvana göre filtreler. '(Hepsi)' seçilirse tüm kayıtlar gösterilir.",
+    )
+
+    # Manuel ünvan girişi (selectbox'a ek olarak)
+    custom_unvan = st.text_input(
+        "Veya ünvan yazın (isteğe bağlı)",
+        placeholder="örn. Liman Başkanı",
+        help="Listede olmayan bir ünvan eklemek için buraya yazın.",
+    )
+    if custom_unvan.strip():
+        selected_unvan = custom_unvan.strip()
+
+    st.markdown("<br>", unsafe_allow_html=True)
+
+    # — Tarih bilgisi
+    st.markdown("<div class='section-label'>📅 Aktif Dönem</div>", unsafe_allow_html=True)
+    first_day, last_day = get_current_month_range()
+    today = datetime.date.today()
+    st.markdown(
+        f"<div style='font-size:0.85rem;color:#8BAEC8;line-height:1.8;'>"
+        f"🗓 Bugün: <b style='color:#E8EDF3;'>{today.strftime('%d.%m.%Y')}</b><br>"
+        f"📌 Cari Ay: <b style='color:#F0C040;'>{first_day.strftime('%B %Y')}</b><br>"
+        f"🔍 Aralık: <b style='color:#E8EDF3;'>{first_day.strftime('%d.%m')} – {last_day.strftime('%d.%m.%Y')}</b>"
+        f"</div>",
+        unsafe_allow_html=True,
+    )
+
+    st.markdown("---")
+    st.markdown(
+        "<div style='font-size:0.72rem;color:#4A7FA5;text-align:center;'>"
+        "v1.0 · Nitelik Belgesi Takip Sistemi<br>"
+        "Streamlit + pandas"
+        "</div>",
+        unsafe_allow_html=True,
+    )
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# ANA İÇERİK
+# ──────────────────────────────────────────────────────────────────────────────
+
+# ── Başlık (Hero) bloğu ──────────────────────────────────────────────────────
+st.markdown(
+    f"""
+    <div class="hero-block">
+        <div class="hero-title">Nitelik Belgesi Takip Sistemi</div>
+        <p class="hero-sub">
+            Gemi personeline ait nitelik belgelerinin bitiş tarihlerini izler.
+            Cari ay içinde süresi dolacak kritik evrakları anında tespit eder.
+            <span style="color:#F0C040;font-weight:600;">
+                &nbsp;·&nbsp; {first_day.strftime('%B %Y')} dönemi aktif.
+            </span>
+        </p>
+    </div>
+    """,
+    unsafe_allow_html=True,
+)
+
+# ── Excel yüklenmemişse yönlendirme mesajı ───────────────────────────────────
 if uploaded_file is None:
-    # Dosya yüklenmemişse kullanıcıyı yönlendir
-    st.info("ℹ️ Lütfen sol panelden personel evrak listesini içeren Excel dosyasını yükleyin.")
+    st.markdown(
+        """
+        <div class="alert-info">
+        <b>📂 Başlamak için sol panelden Excel dosyanızı yükleyin.</b><br><br>
+        Dosyanızda şu sütunlar bulunmalıdır:<br>
+        &nbsp;&nbsp;• <b>Adı Soyadı</b> — personelin tam adı<br>
+        &nbsp;&nbsp;• <b>Sicil No</b> — personel sicil numarası (isteğe bağlı)<br>
+        &nbsp;&nbsp;• <b>Evrak Adı</b> — belgenin adı (örn. STCW Güvenlik, Sağlık Sertifikası)<br>
+        &nbsp;&nbsp;• <b>Başlangıç Tarihi</b> — belgenin başlangıç tarihi (isteğe bağlı)<br>
+        &nbsp;&nbsp;• <b>Bitiş Tarihi</b> — belgenin bitiş tarihi <span style="color:#F0C040;">(zorunlu)</span>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+    # Örnek şablon indirme
+    st.markdown("#### 📥 Örnek Excel Şablonu")
+    sample_df = pd.DataFrame({
+        "Adı Soyadı":      ["Ahmet Yılmaz", "Mehmet Demir", "Ali Kaya"],
+        "Sicil No":        ["001", "002", "003"],
+        "Evrak Adı":       ["STCW Güvenlik", "Sağlık Sertifikası", "Vardiya Zabiti Belgesi"],
+        "Başlangıç Tarihi":["01.07.2023", "15.03.2024", "10.01.2022"],
+        "Bitiş Tarihi":    [
+            today.strftime("%d.%m.%Y"),
+            (today + datetime.timedelta(days=10)).strftime("%d.%m.%Y"),
+            (today + datetime.timedelta(days=90)).strftime("%d.%m.%Y"),
+        ],
+    })
+    sample_excel = make_download_excel(sample_df)
+    st.download_button(
+        label="⬇️ Örnek şablonu indir (.xlsx)",
+        data=sample_excel,
+        file_name="ornek_sablon.xlsx",
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    )
+    st.stop()  # Dosya yoksa sayfanın geri kalanını render etme
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# VERİ YÜKLEME VE İŞLEME
+# ──────────────────────────────────────────────────────────────────────────────
+
+# Dosyayı oku
+df_raw = load_excel(uploaded_file)
+if df_raw is None:
+    st.stop()
+
+# Sütunları normalize et
+df = normalize_columns(df_raw)
+if df is None:
+    st.stop()
+
+# Tarihleri parse et
+df = parse_dates(df)
+
+# Kalan gün hesapla
+df = compute_remaining_days(df)
+
+# Durum etiketi ekle
+df["Durum"] = df["Kalan Gün"].apply(get_status_label)
+
+# Ünvan sütunu ekle (tüm satırlara seçilen ünvanı yaz)
+if selected_unvan and selected_unvan != "(Hepsi)":
+    df.insert(0, "Ünvan", selected_unvan)
 else:
-    # 1. Excel'i oku (Hatalara karşı güçlendirilmiş fonksiyon)
-    df_raw = load_excel(uploaded_file)
-    
-    if df_raw is not None:
-        # 2. Sütun kontrolü
-        required_columns = ["Adı Soyadı", "Sicil No", "Evrak Adı", "Başlangıç Tarihi", "Bitiş Tarihi"]
-        if validate_columns(df_raw, required_columns):
-            # 3. Veriyi hazırla (tarih dönüşümleri)
-            df_clean = prepare_data(df_raw)
-            
-            if df_clean.empty:
-                st.warning("⚠️ Excel dosyasında geçerli 'Bitiş Tarihi' bilgisi bulunamadı.")
-            else:
-                # 4. Bu ay süresi dolanları filtrele
-                df_this_month, first_day, last_day = filter_current_month(df_clean)
-                
-                # 5. Özet metrikleri hesapla
-                if 'Sicil No' in df_clean.columns:
-                    total_personel = df_clean['Sicil No'].nunique()
-                else:
-                    total_personel = df_clean['Adı Soyadı'].nunique()
-                
-                # Bu ay süresi dolan evrak sayısı
-                expired_count = len(df_this_month)
-                
-                # 6. Metrik kartlarını göster
-                col1, col2, col3 = st.columns(3)
-                col1.metric("👥 Toplam Personel", total_personel)
-                col2.metric("📅 Bu Ay Takip Edilen Dönem", f"{first_day.strftime('%d.%m.%Y')} - {last_day.strftime('%d.%m.%Y')}")
-                col3.metric("⚠️ Bu Ay Süresi Dolan Evrak", expired_count)
-                
-                st.divider()
-                
-                # 7. Kritik durum kontrolü ve gösterimler
-                if expired_count > 0:
-                    st.error(f"🚨 DİKKAT: Bu ay süresi dolan **{expired_count}** adet evrak bulunmaktadır! "
-                             f"Aşağıdaki listede detayları inceleyip gerekli yenileme işlemlerini başlatın.")
-                    
-                    # 8. Görüntülenecek tabloyu oluştur
-                    display_df = df_this_month.copy()
-                    
-                    # Kalan gün hesapla (bugüne göre)
-                    today_ts = pd.Timestamp(date.today())
-                    display_df['Kalan Gün Sayısı'] = (display_df['Bitiş Tarihi'] - today_ts).dt.days
-                    
-                    # Ünvan sütununu ekle (kullanıcının seçtiği / girdiği değer)
-                    display_df['Ünvan'] = final_unvan
-                    
-                    # Bitiş Tarihi'ni okunaklı formata çevir
-                    display_df['Bitiş Tarihi'] = display_df['Bitiş Tarihi'].dt.strftime('%d.%m.%Y')
-                    
-                    # İstenen sütun sıralaması
-                    column_order = ['Ünvan', 'Adı Soyadı', 'Sicil No', 'Evrak Adı', 'Bitiş Tarihi', 'Kalan Gün Sayısı']
-                    available_cols = [col for col in column_order if col in display_df.columns]
-                    display_df = display_df[available_cols]
-                    
-                    # 9. İnteraktif tablo gösterimi
-                    st.subheader("📋 Bu Ay Süresi Dolacak Evrak Listesi")
-                    st.dataframe(
-                        display_df,
-                        use_container_width=True,
-                        hide_index=True,
-                        column_config={
-                            "Kalan Gün Sayısı": st.column_config.NumberColumn(
-                                "Kalan Gün",
-                                help="Pozitif: henüz dolmadı, 0: bugün doluyor, Negatif: süresi geçmiş"
-                            )
-                        }
-                    )
-                else:
-                    # Eğer bu ay süresi dolan evrak yoksa bilgi mesajı ve kutlama
-                    st.success("✅ Alan tertemiz! Bu ay içinde süresi dolacak herhangi bir personel evrakı bulunmamaktadır.")
-                    st.balloons()
+    df.insert(0, "Ünvan", "—")
+
+# Cari ay filtresi
+df_month = filter_current_month(df)
+
+# Ünvan filtresi (sidebar'dan)
+if selected_unvan and selected_unvan not in ("(Hepsi)", "—"):
+    df_display = df_month.copy()  # Ünvan zaten sütuna yazıldı
+else:
+    df_display = df_month.copy()
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# METRİK KARTLARI
+# ──────────────────────────────────────────────────────────────────────────────
+
+total_personel   = df["Adı Soyadı"].nunique()
+total_evrak      = len(df)
+ay_biten_evrak   = len(df_month)
+bugun_biten      = len(df[df["Kalan Gün"] == 0])
+dolmus           = len(df[df["Kalan Gün"].apply(lambda x: x is not None and x < 0)])
+bu_hafta_biten   = len(df[df["Kalan Gün"].apply(lambda x: x is not None and 0 < x <= 7)])
+
+col1, col2, col3, col4, col5 = st.columns(5)
+with col1:
+    st.metric("👤 Toplam Personel",   total_personel)
+with col2:
+    st.metric("📄 Toplam Evrak",      total_evrak)
+with col3:
+    st.metric("📅 Bu Ay Bitecek",     ay_biten_evrak,
+              delta=f"-{ay_biten_evrak}" if ay_biten_evrak > 0 else None,
+              delta_color="inverse")
+with col4:
+    st.metric("🔴 Süresi Dolmuş",     dolmus,
+              delta=f"-{dolmus}" if dolmus > 0 else None,
+              delta_color="inverse")
+with col5:
+    st.metric("⚡ Bu Hafta Bitiyor",  bu_hafta_biten,
+              delta=f"-{bu_hafta_biten}" if bu_hafta_biten > 0 else None,
+              delta_color="inverse")
+
+st.markdown("<br>", unsafe_allow_html=True)
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# UYARI KUTULARI
+# ──────────────────────────────────────────────────────────────────────────────
+
+if dolmus > 0:
+    st.markdown(
+        f"<div class='alert-critical'>"
+        f"🚨 <b>ACİL:</b> <b>{dolmus}</b> adet evrakın süresi dolmuş! "
+        f"Bu evrakların ivedilikle yenilenmesi gerekmektedir."
+        f"</div>",
+        unsafe_allow_html=True,
+    )
+
+if bu_hafta_biten > 0:
+    st.markdown(
+        f"<div class='alert-warning'>"
+        f"⚠️ <b>DİKKAT:</b> <b>{bu_hafta_biten}</b> adet evrak bu hafta sona eriyor. "
+        f"Hemen bildirim yapılmalıdır."
+        f"</div>",
+        unsafe_allow_html=True,
+    )
+
+if ay_biten_evrak > 0 and dolmus == 0 and bu_hafta_biten == 0:
+    st.markdown(
+        f"<div class='alert-warning'>"
+        f"⚠️ <b>UYARI:</b> Bu ay toplam <b>{ay_biten_evrak}</b> adet evrakın süresi dolacak. "
+        f"İlgili personel bilgilendirilmelidir."
+        f"</div>",
+        unsafe_allow_html=True,
+    )
+
+if ay_biten_evrak == 0:
+    st.markdown(
+        "<div class='alert-ok'>"
+        "✅ <b>Bu ay süresi dolacak evrak bulunmuyor.</b> Tüm belgeler geçerli görünüyor."
+        "</div>",
+        unsafe_allow_html=True,
+    )
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# FİLTRELEME SATIRLARI
+# ──────────────────────────────────────────────────────────────────────────────
+
+st.markdown("<div class='section-label'>🔍 Tablo Filtreleri</div>", unsafe_allow_html=True)
+
+with st.container():
+    fc1, fc2, fc3 = st.columns([3, 2, 2])
+
+    with fc1:
+        search_name = st.text_input(
+            "Personel adına göre ara",
+            placeholder="örn. Ahmet",
+        )
+    with fc2:
+        evrak_listesi = ["(Hepsi)"] + sorted(df_month["Evrak Adı"].dropna().unique().tolist())
+        selected_evrak = st.selectbox("Evrak türü", evrak_listesi)
+    with fc3:
+        durum_listesi = ["(Hepsi)", "🔴 Süresi Dolmuş", "🟠 Bu Hafta Bitiyor", "🟡 Bu Ay Bitiyor"]
+        selected_durum = st.selectbox("Durum", durum_listesi)
+
+# Filtreleri uygula
+df_filtered = df_display.copy()
+
+if search_name.strip():
+    df_filtered = df_filtered[
+        df_filtered["Adı Soyadı"].str.contains(search_name.strip(), case=False, na=False)
+    ]
+if selected_evrak != "(Hepsi)":
+    df_filtered = df_filtered[df_filtered["Evrak Adı"] == selected_evrak]
+if selected_durum != "(Hepsi)":
+    df_filtered = df_filtered[df_filtered["Durum"] == selected_durum]
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# TABLO — Cari ay kritik evrakları
+# ──────────────────────────────────────────────────────────────────────────────
+
+st.markdown(
+    f"<div class='section-label'>"
+    f"📋 {first_day.strftime('%B %Y')} — Süresi Dolan / Dolacak Evraklar "
+    f"({len(df_filtered)} kayıt)"
+    f"</div>",
+    unsafe_allow_html=True,
+)
+
+if len(df_filtered) == 0:
+    st.markdown(
+        "<div class='alert-info'>"
+        "Seçili filtrelere uygun kayıt bulunamadı. Filtreleri değiştirmeyi deneyin."
+        "</div>",
+        unsafe_allow_html=True,
+    )
+else:
+    # Gösterilecek sütunları seç ve sırala
+    show_cols = ["Ünvan", "Adı Soyadı", "Sicil No", "Evrak Adı",
+                 "Başlangıç Tarihi", "Bitiş Tarihi", "Kalan Gün", "Durum"]
+    show_cols = [c for c in show_cols if c in df_filtered.columns]
+
+    df_show = df_filtered[show_cols].sort_values("Kalan Gün", ascending=True)
+
+    # Tarihleri okunabilir formata çevir
+    for date_col in ["Bitiş Tarihi", "Başlangıç Tarihi"]:
+        if date_col in df_show.columns:
+            df_show[date_col] = df_show[date_col].apply(
+                lambda d: d.strftime("%d.%m.%Y") if pd.notna(d) and d else "-"
+            )
+
+    # Kalan Gün — None değerlerini göster
+    df_show["Kalan Gün"] = df_show["Kalan Gün"].apply(
+        lambda x: int(x) if pd.notna(x) and x is not None else "-"
+    )
+
+    st.dataframe(
+        df_show,
+        use_container_width=True,
+        hide_index=True,
+        height=min(60 + len(df_show) * 36, 520),
+        column_config={
+            "Ünvan":           st.column_config.TextColumn("Ünvan", width="medium"),
+            "Adı Soyadı":      st.column_config.TextColumn("Adı Soyadı", width="medium"),
+            "Sicil No":        st.column_config.TextColumn("Sicil No", width="small"),
+            "Evrak Adı":       st.column_config.TextColumn("Evrak Adı", width="large"),
+            "Başlangıç Tarihi":st.column_config.TextColumn("Başlangıç", width="small"),
+            "Bitiş Tarihi":    st.column_config.TextColumn("Bitiş Tarihi", width="small"),
+            "Kalan Gün":       st.column_config.NumberColumn("Kalan Gün", format="%d gün", width="small"),
+            "Durum":           st.column_config.TextColumn("Durum", width="medium"),
+        },
+    )
+
+    # İndir butonu
+    excel_bytes = make_download_excel(df_show)
+    st.download_button(
+        label="⬇️ Filtrelenmiş listeyi Excel olarak indir",
+        data=excel_bytes,
+        file_name=f"kritik_evraklar_{today.strftime('%Y%m%d')}.xlsx",
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    )
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# TAM LİSTE (isteğe bağlı genişlet)
+# ──────────────────────────────────────────────────────────────────────────────
+
+with st.expander("📄 Tüm evrak listesini göster (tüm aylar)"):
+    show_all_cols = ["Ünvan", "Adı Soyadı", "Sicil No", "Evrak Adı",
+                     "Başlangıç Tarihi", "Bitiş Tarihi", "Kalan Gün", "Durum"]
+    show_all_cols = [c for c in show_all_cols if c in df.columns]
+
+    df_all = df[show_all_cols].copy()
+    for date_col in ["Bitiş Tarihi", "Başlangıç Tarihi"]:
+        if date_col in df_all.columns:
+            df_all[date_col] = df_all[date_col].apply(
+                lambda d: d.strftime("%d.%m.%Y") if pd.notna(d) and d else "-"
+            )
+    df_all["Kalan Gün"] = df_all["Kalan Gün"].apply(
+        lambda x: int(x) if pd.notna(x) and x is not None else "-"
+    )
+    df_all_sorted = df_all.sort_values("Kalan Gün", ascending=True)
+
+    st.dataframe(
+        df_all_sorted,
+        use_container_width=True,
+        hide_index=True,
+        height=400,
+    )
+
+    all_excel = make_download_excel(df_all_sorted)
+    st.download_button(
+        label="⬇️ Tüm listeyi Excel olarak indir",
+        data=all_excel,
+        file_name=f"tum_evraklar_{today.strftime('%Y%m%d')}.xlsx",
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        key="dl_all",
+    )
