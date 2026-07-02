@@ -2,7 +2,7 @@
 ⚓ Gemi Personeli Nitelik Belgesi Takip Sistemi
 ================================================
 Yazar      : Claude (Anthropic)
-Versiyon   : 1.0.0
+Versiyon   : 1.1.0
 Açıklama   : Personele ait nitelik belgelerinin bitiş tarihlerini izler,
              cari ay içinde süresi dolacak evrakları dinamik uyarılarla
              ve filtrelenebilir tablolarla kullanıcıya sunar.
@@ -217,20 +217,68 @@ def get_current_month_range() -> tuple[datetime.date, datetime.date]:
 
 def load_excel(file) -> pd.DataFrame | None:
     """
-    Yüklenen Excel dosyasını okur.
-    Hem .xlsx hem .xls formatını destekler.
-    Beklenen sütunlar: Adı Soyadı, Sicil No, Evrak Adı, Başlangıç Tarihi, Bitiş Tarihi
+    Yüklenen dosyayı akıllıca okur.
+    Gerçek format ne olursa olsun (.xlsx, .xls, TSV/CSV .xls uzantılı) handle eder.
+
+    Strateji:
+    1. İlk 8 bayta bakarak gerçek formatı tespit et (magic bytes).
+    2. Gerçek Excel (OLE2/OOXML) ise ilgili engine ile oku.
+    3. Değilse metin dosyası say; sekme (\\t) veya virgül (,) ayırıcısını dene.
+       Türkçe karakterler için windows-1254 → iso-8859-9 → utf-8 sırasıyla dene.
     """
+    raw_bytes = file.read()  # Tüm içeriği bir kez oku
+    file.seek(0)             # Pointer'ı başa al
+
+    filename = file.name.lower()
+
+    # ── Magic byte tespiti ────────────────────────────────────────────────────
+    magic = raw_bytes[:8]
+    is_ole2  = magic[:8] == b'\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1'   # Gerçek .xls (BIFF)
+    is_ooxml = magic[:4] == b'PK\x03\x04'                           # .xlsx (ZIP/OOXML)
+
+    # ── Gerçek Excel formatı ──────────────────────────────────────────────────
+    if is_ole2:
+        try:
+            return pd.read_excel(io.BytesIO(raw_bytes), engine="xlrd")
+        except Exception as e:
+            st.error(f"XLS dosyası okunamadı: {e}")
+            return None
+
+    if is_ooxml:
+        try:
+            return pd.read_excel(io.BytesIO(raw_bytes), engine="openpyxl")
+        except Exception as e:
+            st.error(f"XLSX dosyası okunamadı: {e}")
+            return None
+
+    # ── Metin tabanlı dosya (TSV / CSV, .xls uzantılı olsa bile) ─────────────
+    # Türkçe Windows encoding sırası
+    ENCODINGS = ["windows-1254", "iso-8859-9", "utf-8-sig", "utf-8", "latin-1"]
+    text_content = None
+    used_encoding = None
+
+    for enc in ENCODINGS:
+        try:
+            text_content = raw_bytes.decode(enc)
+            used_encoding = enc
+            break
+        except (UnicodeDecodeError, LookupError):
+            continue
+
+    if text_content is None:
+        st.error("Dosya kodlaması tanınamadı. Lütfen dosyayı UTF-8 veya Windows-1254 ile kaydedin.")
+        return None
+
+    # Ayırıcı tespiti: ilk satırdaki sekme sayısı > virgül sayısı → TSV
+    first_line = text_content.split("\n")[0]
+    sep = "\t" if first_line.count("\t") >= first_line.count(",") else ","
+
     try:
-        # Dosya uzantısına göre engine seç
-        filename = file.name.lower()
-        if filename.endswith(".xls"):
-            df = pd.read_excel(file, engine="xlrd")
-        else:
-            df = pd.read_excel(file, engine="openpyxl")
+        df = pd.read_csv(io.StringIO(text_content), sep=sep, dtype=str)
+        df.columns = df.columns.str.strip()
         return df
     except Exception as e:
-        st.error(f"Dosya okunurken hata oluştu: {e}")
+        st.error(f"Metin dosyası okunamadı: {e}")
         return None
 
 
@@ -248,22 +296,43 @@ def normalize_columns(df: pd.DataFrame) -> pd.DataFrame | None:
                 .replace(" ", ""))
 
     col_map = {
+        # Ad / Adı Soyadı varyantları
         "adisoyadı": "Adı Soyadı",
-        "adsoyad": "Adı Soyadı",
-        "ad": "Adı Soyadı",
-        "sicilno": "Sicil No",
-        "sicil": "Sicil No",
-        "evrakadi": "Evrak Adı",
+        "adisoyadi": "Adı Soyadı",
+        "adsoyad":   "Adı Soyadı",
+        "ad":        "Adı Soyadı",
+        "adsoyadi":  "Adı Soyadı",
+        "personel":  "Adı Soyadı",
+        # Sicil No
+        "sicilno":   "Sicil No",
+        "sicil":     "Sicil No",
+        "sicilnumarasi": "Sicil No",
+        # Evrak Adı / Nitelik
+        "evrakadi":       "Evrak Adı",
+        "evrak":          "Evrak Adı",
         "nitelikbelgesi": "Evrak Adı",
-        "nitelik": "Evrak Adı",
-        "belge": "Evrak Adı",
-        "baslangiçtarihi": "Başlangıç Tarihi",
-        "baslangiç": "Başlangıç Tarihi",
-        "baslangictarihi": "Başlangıç Tarihi",
-        "bitistarihi": "Bitiş Tarihi",
-        "bitiştarihi": "Bitiş Tarihi",
-        "bitis": "Bitiş Tarihi",
-        "bitiş": "Bitiş Tarihi",
+        "nitelik":        "Evrak Adı",
+        "belge":          "Evrak Adı",
+        "belgeadi":       "Evrak Adı",
+        "sertifika":      "Evrak Adı",
+        # Başlangıç Tarihi varyantları
+        "baslangiçtarihi":  "Başlangıç Tarihi",
+        "baslangiç":        "Başlangıç Tarihi",
+        "baslangictarihi":  "Başlangıç Tarihi",
+        "baslangic":        "Başlangıç Tarihi",
+        "baslangictarih":   "Başlangıç Tarihi",
+        "baslangic tarihi": "Başlangıç Tarihi",
+        # Bitiş Tarihi varyantları
+        "bitistarihi":  "Bitiş Tarihi",
+        "bitiştarihi":  "Bitiş Tarihi",
+        "bitis":        "Bitiş Tarihi",
+        "bitiş":        "Bitiş Tarihi",
+        "bitistarihi":  "Bitiş Tarihi",
+        "bitis tarihi": "Bitiş Tarihi",
+        "gecerlilik":   "Bitiş Tarihi",
+        "gecerliliktarihi": "Bitiş Tarihi",
+        "son gecerlilik":   "Bitiş Tarihi",
+        "songecerlilik":    "Bitiş Tarihi",
     }
 
     renamed = {}
@@ -295,11 +364,36 @@ def normalize_columns(df: pd.DataFrame) -> pd.DataFrame | None:
 def parse_dates(df: pd.DataFrame) -> pd.DataFrame:
     """
     'Bitiş Tarihi' ve 'Başlangıç Tarihi' sütunlarını datetime.date tipine dönüştürür.
-    Hatalı değerleri NaT olarak işaretler (errors='coerce').
+    Desteklenen formatlar: d.M.YYYY · dd.MM.YYYY · YYYY-MM-DD · d/M/YYYY
+    Hatalı değerler NaT olarak işaretlenir.
     """
+    DATE_FORMATS = [
+        "%d.%m.%Y",   # 02.07.2026
+        "%-d.%-m.%Y", # 2.7.2026  (Unix only)
+        "%d/%m/%Y",   # 02/07/2026
+        "%Y-%m-%d",   # 2026-07-02
+        "%d.%m.%y",   # 02.07.26
+    ]
+
+    def parse_one(val):
+        if pd.isna(val) or str(val).strip() in ("", "nan", "None", "-"):
+            return None
+        s = str(val).strip()
+        # Önce pandas'ın genel parser'ını dene (dayfirst=True)
+        parsed = pd.to_datetime(s, dayfirst=True, errors="coerce")
+        if pd.notna(parsed):
+            return parsed.date()
+        # Sonra bilinen formatları teker teker dene
+        for fmt in DATE_FORMATS:
+            try:
+                return datetime.datetime.strptime(s, fmt).date()
+            except (ValueError, TypeError):
+                continue
+        return None
+
     for col in ["Bitiş Tarihi", "Başlangıç Tarihi"]:
         if col in df.columns:
-            df[col] = pd.to_datetime(df[col], errors="coerce", dayfirst=True).dt.date
+            df[col] = df[col].apply(parse_one)
     return df
 
 
