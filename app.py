@@ -24,16 +24,28 @@ st.set_page_config(
 @st.cache_data
 def load_excel(file):
     """
-    Yüklenen Excel dosyasını openpyxl motoru ile okur ve DataFrame olarak döndürür.
-    'engine' parametresi dosya formatı belirsizliği hatasını tamamen çözer.
+    Yüklenen Excel dosyasını akıllıca okur. 
+    Önce modern .xlsx (openpyxl) dener, 'zip file' hatası alırsa eski tip .xls (xlrd) dener.
     """
     try:
+        # Önce modern .xlsx formatını zorla
         df = pd.read_excel(file, engine='openpyxl')
         return df
     except Exception as e:
-        st.error(f"Excel dosyası okunurken hata oluştu: {e}")
-        st.info("Lütfen yüklediğiniz dosyanın gerçekten geçerli bir .xlsx veya .xls dosyası olduğundan emin olun.")
-        return None
+        # Eğer zip hatası aldıysa, büyük ihtimalle eski format bir .xls dosyasıdır
+        if "File is not a zip file" in str(e):
+            try:
+                # Dosya imlecini tekrar başa sarıp xlrd motorunu deniyoruz
+                file.seek(0)
+                df = pd.read_excel(file, engine='xlrd')
+                return df
+            except Exception as xlrd_error:
+                st.error("Excel formatı çözülemedi. Dosyanız eski tip (.xls) bir Excel ise lütfen terminalden 'pip install xlrd' komutunu çalıştırın.")
+                return None
+        else:
+            st.error(f"Excel dosyası okunurken hata oluştu: {e}")
+            st.info("Lütfen yüklediğiniz dosyanın gerçekten geçerli bir Excel dosyası olduğundan emin olun.")
+            return None
 
 def validate_columns(df, required_cols):
     """Gerekli sütunların DataFrame'de olup olmadığını kontrol eder."""
@@ -115,7 +127,7 @@ if uploaded_file is None:
     # Dosya yüklenmemişse kullanıcıyı yönlendir
     st.info("ℹ️ Lütfen sol panelden personel evrak listesini içeren Excel dosyasını yükleyin.")
 else:
-    # 1. Excel'i oku (Güncellenen güvenli fonksiyon)
+    # 1. Excel'i oku (Hatalara karşı güçlendirilmiş fonksiyon)
     df_raw = load_excel(uploaded_file)
     
     if df_raw is not None:
@@ -186,5 +198,5 @@ else:
                     )
                 else:
                     # Eğer bu ay süresi dolan evrak yoksa bilgi mesajı ve kutlama
-                    st.success("✅ Tebrikler! Bu ay içinde süresi dolacak herhangi bir evrak bulunmamaktadır.")
+                    st.success("✅ Alan tertemiz! Bu ay içinde süresi dolacak herhangi bir personel evrakı bulunmamaktadır.")
                     st.balloons()
