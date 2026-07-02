@@ -2,7 +2,7 @@
 ⚓ Gemi Personeli Nitelik Belgesi Takip Sistemi
 ================================================
 Yazar      : Claude (Anthropic)
-Versiyon   : 1.1.0
+Versiyon   : 1.2.0
 Açıklama   : Personele ait nitelik belgelerinin bitiş tarihlerini izler,
              cari ay içinde süresi dolacak evrakları dinamik uyarılarla
              ve filtrelenebilir tablolarla kullanıcıya sunar.
@@ -206,13 +206,34 @@ hr { border-color: #1E3A52 !important; }
 # YARDIMCI FONKSİYONLAR
 # ──────────────────────────────────────────────────────────────────────────────
 
-def get_current_month_range() -> tuple[datetime.date, datetime.date]:
-    """Bugünün ayının ilk ve son gününü döndürür."""
-    today = datetime.date.today()
-    first_day = today.replace(day=1)
-    last_day_num = calendar.monthrange(today.year, today.month)[1]
-    last_day = today.replace(day=last_day_num)
+def get_month_range(year: int, month: int) -> tuple[datetime.date, datetime.date]:
+    """Verilen yıl ve ay için ilk ve son günü döndürür."""
+    first_day = datetime.date(year, month, 1)
+    last_day_num = calendar.monthrange(year, month)[1]
+    last_day = datetime.date(year, month, last_day_num)
     return first_day, last_day
+
+
+def get_month_options() -> list:
+    """
+    Bugünden başlayarak 12 aylık seçim listesi döndürür.
+    Her eleman: (görünen ad, yıl, ay)
+    """
+    today = datetime.date.today()
+    TR_AYLAR = [
+        "", "Ocak", "Şubat", "Mart", "Nisan", "Mayıs", "Haziran",
+        "Temmuz", "Ağustos", "Eylül", "Ekim", "Kasım", "Aralık"
+    ]
+    options = []
+    for i in range(12):
+        month_offset = today.month - 1 + i
+        y = today.year + month_offset // 12
+        m = month_offset % 12 + 1
+        label = f"{TR_AYLAR[m]} {y}"
+        if i == 0:
+            label += "  ← Cari Ay"
+        options.append((label, y, m))
+    return options
 
 
 def load_excel(file) -> pd.DataFrame | None:
@@ -419,11 +440,11 @@ def get_status_label(days) -> str:
     return "🟢 Geçerli"
 
 
-def filter_current_month(df: pd.DataFrame) -> pd.DataFrame:
-    """Cari ay içinde süresi dolan kayıtları filtreler."""
-    first_day, last_day = get_current_month_range()
+def filter_by_month(df: pd.DataFrame, year: int, month: int) -> pd.DataFrame:
+    """Belirtilen ay içinde süresi dolan kayıtları filtreler."""
+    first_day, last_day = get_month_range(year, month)
     mask = df["Bitiş Tarihi"].apply(
-        lambda d: pd.notna(d) and first_day <= d <= last_day
+        lambda d: d is not None and pd.notna(d) and first_day <= d <= last_day
     )
     return df[mask].copy()
 
@@ -463,18 +484,10 @@ with st.sidebar:
     UNVAN_LISTESI = [
         "(Hepsi)",
         "Kaptan",
-        "Baş Zabiti",
-        "İkinci Zabiti",
-        "Üçüncü Zabiti",
         "Başmakinist",
-        "İkinci Makinist",
-        "Üçüncü Makinist",
-        "Seyir Zabiti",
-        "Elektrik Zabiti",
-        "Güverte Tayfası",
-        "Makine Tayfası",
-        "Aşçı",
+        "Güverte L.",
         "Gemici",
+        "Yağcı",
         "Diğer",
     ]
     selected_unvan = st.selectbox(
@@ -495,15 +508,27 @@ with st.sidebar:
 
     st.markdown("<br>", unsafe_allow_html=True)
 
-    # — Tarih bilgisi
-    st.markdown("<div class='section-label'>📅 Aktif Dönem</div>", unsafe_allow_html=True)
-    first_day, last_day = get_current_month_range()
+    # — Ay seçimi
+    st.markdown("<div class='section-label'>📅 Kontrol Dönemi</div>", unsafe_allow_html=True)
+    month_options = get_month_options()
+    month_labels  = [x[0] for x in month_options]
+    selected_month_label = st.selectbox(
+        "Hangi ayı kontrol etmek istiyorsunuz?",
+        options=month_labels,
+        index=0,
+        help="Varsayılan: bugünün bulunduğu ay. İlerideki ayları da seçebilirsiniz.",
+    )
+    # Seçilen etiketin yıl ve ay bilgisini al
+    sel_idx   = month_labels.index(selected_month_label)
+    sel_year  = month_options[sel_idx][1]
+    sel_month = month_options[sel_idx][2]
+    first_day, last_day = get_month_range(sel_year, sel_month)
+
     today = datetime.date.today()
     st.markdown(
-        f"<div style='font-size:0.85rem;color:#8BAEC8;line-height:1.8;'>"
+        f"<div style='font-size:0.82rem;color:#8BAEC8;line-height:1.9;margin-top:10px;'>"
         f"🗓 Bugün: <b style='color:#E8EDF3;'>{today.strftime('%d.%m.%Y')}</b><br>"
-        f"📌 Cari Ay: <b style='color:#F0C040;'>{first_day.strftime('%B %Y')}</b><br>"
-        f"🔍 Aralık: <b style='color:#E8EDF3;'>{first_day.strftime('%d.%m')} – {last_day.strftime('%d.%m.%Y')}</b>"
+        f"🔍 Aralık: <b style='color:#F0C040;'>{first_day.strftime('%d.%m')} – {last_day.strftime('%d.%m.%Y')}</b>"
         f"</div>",
         unsafe_allow_html=True,
     )
@@ -511,7 +536,7 @@ with st.sidebar:
     st.markdown("---")
     st.markdown(
         "<div style='font-size:0.72rem;color:#4A7FA5;text-align:center;'>"
-        "v1.0 · Nitelik Belgesi Takip Sistemi<br>"
+        "v1.2 · Nitelik Belgesi Takip Sistemi<br>"
         "Streamlit + pandas"
         "</div>",
         unsafe_allow_html=True,
@@ -608,8 +633,8 @@ if selected_unvan and selected_unvan != "(Hepsi)":
 else:
     df.insert(0, "Ünvan", "—")
 
-# Cari ay filtresi
-df_month = filter_current_month(df)
+# Seçilen ay filtresi
+df_month = filter_by_month(df, sel_year, sel_month)
 
 # Ünvan filtresi (sidebar'dan)
 if selected_unvan and selected_unvan not in ("(Hepsi)", "—"):
