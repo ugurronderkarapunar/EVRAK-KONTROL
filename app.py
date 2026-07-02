@@ -23,12 +23,16 @@ st.set_page_config(
 # ----------------------------- Yardımcı Fonksiyonlar -----------------------------
 @st.cache_data
 def load_excel(file):
-    """Yüklenen Excel dosyasını okur ve DataFrame olarak döndürür."""
+    """
+    Yüklenen Excel dosyasını openpyxl motoru ile okur ve DataFrame olarak döndürür.
+    'engine' parametresi dosya formatı belirsizliği hatasını tamamen çözer.
+    """
     try:
-        df = pd.read_excel(file)
+        df = pd.read_excel(file, engine='openpyxl')
         return df
     except Exception as e:
         st.error(f"Excel dosyası okunurken hata oluştu: {e}")
+        st.info("Lütfen yüklediğiniz dosyanın gerçekten geçerli bir .xlsx veya .xls dosyası olduğundan emin olun.")
         return None
 
 def validate_columns(df, required_cols):
@@ -45,7 +49,7 @@ def prepare_data(df):
     df = df.copy()
     # Bitiş Tarihi'ni datetime formatına çevir, hataları NaT yap
     df['Bitiş Tarihi'] = pd.to_datetime(df['Bitiş Tarihi'], dayfirst=True, errors='coerce')
-    # Başlangıç Tarihi'ni de dönüştürelim (ileride belki kullanılır)
+    # Başlangıç Tarihi'ni de dönüştürelim
     df['Başlangıç Tarihi'] = pd.to_datetime(df['Başlangıç Tarihi'], dayfirst=True, errors='coerce')
     # Geçerli tarih olmayan satırları temizle
     df = df.dropna(subset=['Bitiş Tarihi']).reset_index(drop=True)
@@ -102,7 +106,7 @@ with st.sidebar:
         custom_unvan = st.text_input("Ünvanı yazınız", value="", placeholder="Örn: Elektrik Zabiti")
         final_unvan = custom_unvan.strip() if custom_unvan.strip() else "Belirtilmedi"
     elif unvan_secim == "Seçiniz":
-        final_unvan = ""  # Boş bırakılacak, tabloda "Belirtilmedi" yazabilir
+        final_unvan = "Belirtilmedi"  # Tabloda boş kalmaması için varsayılan atandı
     else:
         final_unvan = unvan_secim
 
@@ -111,7 +115,7 @@ if uploaded_file is None:
     # Dosya yüklenmemişse kullanıcıyı yönlendir
     st.info("ℹ️ Lütfen sol panelden personel evrak listesini içeren Excel dosyasını yükleyin.")
 else:
-    # 1. Excel'i oku
+    # 1. Excel'i oku (Güncellenen güvenli fonksiyon)
     df_raw = load_excel(uploaded_file)
     
     if df_raw is not None:
@@ -128,7 +132,6 @@ else:
                 df_this_month, first_day, last_day = filter_current_month(df_clean)
                 
                 # 5. Özet metrikleri hesapla
-                # Toplam personel sayısı (benzersiz Sicil No veya Adı Soyadı)
                 if 'Sicil No' in df_clean.columns:
                     total_personel = df_clean['Sicil No'].nunique()
                 else:
@@ -145,7 +148,7 @@ else:
                 
                 st.divider()
                 
-                # 7. Kritik uyarı kutusu
+                # 7. Kritik durum kontrolü ve gösterimler
                 if expired_count > 0:
                     st.error(f"🚨 DİKKAT: Bu ay süresi dolan **{expired_count}** adet evrak bulunmaktadır! "
                              f"Aşağıdaki listede detayları inceleyip gerekli yenileme işlemlerini başlatın.")
@@ -158,14 +161,13 @@ else:
                     display_df['Kalan Gün Sayısı'] = (display_df['Bitiş Tarihi'] - today_ts).dt.days
                     
                     # Ünvan sütununu ekle (kullanıcının seçtiği / girdiği değer)
-                    display_df['Ünvan'] = final_unvan if final_unvan else "Belirtilmedi"
+                    display_df['Ünvan'] = final_unvan
                     
                     # Bitiş Tarihi'ni okunaklı formata çevir
                     display_df['Bitiş Tarihi'] = display_df['Bitiş Tarihi'].dt.strftime('%d.%m.%Y')
                     
                     # İstenen sütun sıralaması
                     column_order = ['Ünvan', 'Adı Soyadı', 'Sicil No', 'Evrak Adı', 'Bitiş Tarihi', 'Kalan Gün Sayısı']
-                    # Varsa tüm sütunlar seç, yoksa eksik olanları atla (hata almamak için)
                     available_cols = [col for col in column_order if col in display_df.columns]
                     display_df = display_df[available_cols]
                     
@@ -183,6 +185,6 @@ else:
                         }
                     )
                 else:
-                    # Eğer bu ay süresi dolan evrak yoksa bilgi mesajı
+                    # Eğer bu ay süresi dolan evrak yoksa bilgi mesajı ve kutlama
                     st.success("✅ Tebrikler! Bu ay içinde süresi dolacak herhangi bir evrak bulunmamaktadır.")
                     st.balloons()
