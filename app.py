@@ -479,35 +479,6 @@ with st.sidebar:
 
     st.markdown("<br>", unsafe_allow_html=True)
 
-    # — Ünvan seçimi (manuel giriş)
-    st.markdown("<div class='section-label'>👤 Personel Ünvanı</div>", unsafe_allow_html=True)
-    UNVAN_LISTESI = [
-        "(Hepsi)",
-        "Kaptan",
-        "Başmakinist",
-        "Güverte L.",
-        "Gemici",
-        "Yağcı",
-        "Diğer",
-    ]
-    selected_unvan = st.selectbox(
-        "Ünvana göre filtrele",
-        options=UNVAN_LISTESI,
-        index=0,
-        help="Tabloyu seçili ünvana göre filtreler. '(Hepsi)' seçilirse tüm kayıtlar gösterilir.",
-    )
-
-    # Manuel ünvan girişi (selectbox'a ek olarak)
-    custom_unvan = st.text_input(
-        "Veya ünvan yazın (isteğe bağlı)",
-        placeholder="örn. Liman Başkanı",
-        help="Listede olmayan bir ünvan eklemek için buraya yazın.",
-    )
-    if custom_unvan.strip():
-        selected_unvan = custom_unvan.strip()
-
-    st.markdown("<br>", unsafe_allow_html=True)
-
     # — Ay seçimi
     st.markdown("<div class='section-label'>📅 Kontrol Dönemi</div>", unsafe_allow_html=True)
     month_options = get_month_options()
@@ -627,21 +598,111 @@ df = compute_remaining_days(df)
 # Durum etiketi ekle
 df["Durum"] = df["Kalan Gün"].apply(get_status_label)
 
-# Ünvan sütunu ekle (tüm satırlara seçilen ünvanı yaz)
-if selected_unvan and selected_unvan != "(Hepsi)":
-    df.insert(0, "Ünvan", selected_unvan)
-else:
-    df.insert(0, "Ünvan", "—")
+# ── Ünvan atamaları (session_state'ten) ──────────────────────────────────────
+# Benzersiz personel listesi
+personel_listesi = sorted(df["Adı Soyadı"].dropna().unique().tolist())
+
+# session_state başlat
+if "unvan_map" not in st.session_state:
+    st.session_state["unvan_map"] = {}
+
+# Her personele atanmış ünvanı sütun olarak ekle
+def get_unvan(ad):
+    return st.session_state["unvan_map"].get(ad, "— Atanmadı —")
+
+df.insert(0, "Ünvan", df["Adı Soyadı"].apply(get_unvan))
 
 # Seçilen ay filtresi
 df_month = filter_by_month(df, sel_year, sel_month)
+df_display = df_month.copy()
 
-# Ünvan filtresi (sidebar'dan)
-if selected_unvan and selected_unvan not in ("(Hepsi)", "—"):
-    df_display = df_month.copy()  # Ünvan zaten sütuna yazıldı
-else:
-    df_display = df_month.copy()
 
+# ──────────────────────────────────────────────────────────────────────────────
+# ÜNVAN ATAMA EKRANI
+# ──────────────────────────────────────────────────────────────────────────────
+
+UNVAN_LISTESI = [
+    "— Atanmadı —",
+    "Kaptan",
+    "Başmakinist",
+    "Güverte L.",
+    "Gemici",
+    "Yağcı",
+    "Diğer",
+]
+
+with st.expander(
+    f"👤 Personel Ünvan Ataması  —  {len(personel_listesi)} kişi  "
+    f"({'✅ Tümü atandı' if all(p in st.session_state['unvan_map'] and st.session_state['unvan_map'][p] != '— Atanmadı —' for p in personel_listesi) else f'⚠️ {sum(1 for p in personel_listesi if st.session_state["unvan_map"].get(p,"— Atanmadı —") == "— Atanmadı —")} kişiye henüz ünvan atanmadı'})",
+    expanded=any(
+        st.session_state["unvan_map"].get(p, "— Atanmadı —") == "— Atanmadı —"
+        for p in personel_listesi
+    ),
+):
+    st.markdown(
+        "<div style='font-size:0.85rem;color:#8BAEC8;margin-bottom:14px;'>"
+        "Her personel için doğru ünvanı seçin. Değişiklikler anında tabloya yansır."
+        "</div>",
+        unsafe_allow_html=True,
+    )
+
+    # Toplu atama kısayolu
+    ca1, ca2, ca3 = st.columns([2, 2, 3])
+    with ca1:
+        bulk_unvan = st.selectbox(
+            "Toplu ata:",
+            ["(Seçin)"] + UNVAN_LISTESI[1:],
+            key="bulk_unvan_sel",
+        )
+    with ca2:
+        # Sadece atanmamışlara veya hepsine uygula
+        bulk_target = st.selectbox(
+            "Kimlere?",
+            ["Atanmamış olanlara", "Tüm personele"],
+            key="bulk_target_sel",
+        )
+    with ca3:
+        st.markdown("<br>", unsafe_allow_html=True)
+        if st.button("⚡ Toplu Uygula", key="bulk_apply"):
+            if bulk_unvan != "(Seçin)":
+                for p in personel_listesi:
+                    mevcut = st.session_state["unvan_map"].get(p, "— Atanmadı —")
+                    if bulk_target == "Tüm personele" or mevcut == "— Atanmadı —":
+                        st.session_state["unvan_map"][p] = bulk_unvan
+                st.rerun()
+
+    st.markdown("---")
+
+    # Kişi başı ünvan atama — 3 sütunlu grid
+    cols_per_row = 3
+    for row_start in range(0, len(personel_listesi), cols_per_row):
+        row_personel = personel_listesi[row_start:row_start + cols_per_row]
+        cols = st.columns(cols_per_row)
+        for col, personel in zip(cols, row_personel):
+            with col:
+                mevcut = st.session_state["unvan_map"].get(personel, "— Atanmadı —")
+                idx = UNVAN_LISTESI.index(mevcut) if mevcut in UNVAN_LISTESI else 0
+                secim = col.selectbox(
+                    label=personel,
+                    options=UNVAN_LISTESI,
+                    index=idx,
+                    key=f"unvan_{personel}",
+                )
+                if secim != st.session_state["unvan_map"].get(personel):
+                    st.session_state["unvan_map"][personel] = secim
+
+    st.markdown("---")
+    # Sıfırla butonu
+    if st.button("🗑 Tüm ünvan atamalarını sıfırla", key="reset_unvanlar"):
+        st.session_state["unvan_map"] = {}
+        st.rerun()
+
+# Ünvan ataması yapılmış personeli df'e yansıt
+df["Ünvan"] = df["Adı Soyadı"].apply(get_unvan)
+df_month["Ünvan"] = df_month["Adı Soyadı"].apply(get_unvan)
+df_display["Ünvan"] = df_display["Adı Soyadı"].apply(get_unvan)
+
+st.markdown("<br>", unsafe_allow_html=True)
 
 # ──────────────────────────────────────────────────────────────────────────────
 # METRİK KARTLARI
@@ -722,7 +783,7 @@ if ay_biten_evrak == 0:
 st.markdown("<div class='section-label'>🔍 Tablo Filtreleri</div>", unsafe_allow_html=True)
 
 with st.container():
-    fc1, fc2, fc3 = st.columns([3, 2, 2])
+    fc1, fc2, fc3, fc4 = st.columns([3, 2, 2, 2])
 
     with fc1:
         search_name = st.text_input(
@@ -735,6 +796,9 @@ with st.container():
     with fc3:
         durum_listesi = ["(Hepsi)", "🔴 Süresi Dolmuş", "🟠 Bu Hafta Bitiyor", "🟡 Bu Ay Bitiyor"]
         selected_durum = st.selectbox("Durum", durum_listesi)
+    with fc4:
+        unvan_filtre_listesi = ["(Hepsi)"] + UNVAN_LISTESI[1:]
+        selected_unvan_filtre = st.selectbox("Ünvana göre", unvan_filtre_listesi)
 
 # Filtreleri uygula
 df_filtered = df_display.copy()
@@ -747,6 +811,8 @@ if selected_evrak != "(Hepsi)":
     df_filtered = df_filtered[df_filtered["Evrak Adı"] == selected_evrak]
 if selected_durum != "(Hepsi)":
     df_filtered = df_filtered[df_filtered["Durum"] == selected_durum]
+if selected_unvan_filtre != "(Hepsi)":
+    df_filtered = df_filtered[df_filtered["Ünvan"] == selected_unvan_filtre]
 
 
 # ──────────────────────────────────────────────────────────────────────────────
