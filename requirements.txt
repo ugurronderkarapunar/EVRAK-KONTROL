@@ -1,7 +1,7 @@
 streamlit
 pandas
-plotly>=5.14.0
-numpy>=1.24.0
+plotly
+numpy
 openpyxl
 streamlit
 pandas
