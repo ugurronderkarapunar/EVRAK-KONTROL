@@ -163,8 +163,9 @@ PLOTLY_LAYOUT = dict(
     plot_bgcolor="rgba(17,34,54,0.0)",
     font=dict(color="#E8EDF3", family="Inter"),
     margin=dict(l=16, r=16, t=36, b=16),
-    legend=dict(bgcolor="rgba(0,0,0,0)", bordercolor="rgba(0,0,0,0)"),
 )
+# Grafik içinde legend gerekirse ayrıca geçilir
+LEGEND_STYLE = dict(bgcolor="rgba(0,0,0,0)", bordercolor="rgba(0,0,0,0)")
 
 DURUM_RENKLERI = {
     "🔴 Süresi Dolmuş":   "#E74C3C",
@@ -337,7 +338,8 @@ def grafik_durum_pasta(df: pd.DataFrame):
     fig.update_layout(
         title=dict(text="📊 Evrak Durum Dağılımı", font=dict(size=14, color="#F0C040")),
         showlegend=True,
-        legend=dict(orientation="v", x=1.02, y=0.5, font=dict(size=11)),
+        legend=dict(orientation="v", x=1.02, y=0.5, font=dict(size=11),
+                    bgcolor="rgba(0,0,0,0)", bordercolor="rgba(0,0,0,0)"),
         **PLOTLY_LAYOUT,
     )
     return fig
@@ -887,7 +889,8 @@ with tab_grafik:
                        font=dict(size=14, color="#F0C040")),
             xaxis=dict(gridcolor="#1E3A52"),
             yaxis=dict(gridcolor="#1E3A52", tickfont=dict(size=9)),
-            legend=dict(orientation="h", y=-0.18, font=dict(size=10)),
+            legend=dict(orientation="h", y=-0.18, font=dict(size=10),
+                    bgcolor="rgba(0,0,0,0)", bordercolor="rgba(0,0,0,0)"),
             height=480,
             **PLOTLY_LAYOUT,
         )
