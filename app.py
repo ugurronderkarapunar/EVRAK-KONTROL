@@ -317,15 +317,12 @@ def get_unvan(ad):
 # localStorage KÖPRÜSÜ (Her render'da sağlam veri alışverişi)
 # ══════════════════════════════════════════════════════════════════════════════
 
-# Session state ilk kurulum
 if "unvan_map" not in st.session_state:
     st.session_state["unvan_map"] = {}
 if "ls_loaded" not in st.session_state:
     st.session_state["ls_loaded"] = False
 
-# ── OKUMA: localStorage'dan session_state'e ────────────────────────────────
 if not st.session_state["ls_loaded"]:
-    # query_params üzerinden localStorage verisi al (JS tarafından yerleştirilir)
     raw = st.query_params.get("_u", "")
     if raw:
         try:
@@ -336,8 +333,6 @@ if not st.session_state["ls_loaded"]:
             pass
     st.session_state["ls_loaded"] = True
 
-# ── YAZMA: Her render'da güncel unvan_map'i localStorage'a yaz ─────────────
-# Bu HTML her sayfa yüklemesinde çalışır, st.rerun() sonrası da çalışır.
 unvan_map_json = json.dumps(st.session_state["unvan_map"], ensure_ascii=False)
 
 components.html(f"""
@@ -352,9 +347,7 @@ components.html(f"""
 </script>
 """, height=0)
 
-# ── İlk yüklemede localStorage → URL aktarımı (sadece bir kez) ─────────────
 if not st.session_state["ls_loaded"]:
-    # localStorage'dan okuyup URL'e yaz, sonra sayfayı yenile
     components.html("""
     <script>
     (function() {
@@ -370,12 +363,9 @@ if not st.session_state["ls_loaded"]:
     })();
     </script>
     """, height=0)
-    # Yukarıdaki script reload yaparsa buradan sonrası çalışmaz.
-    # Reload olmazsa devam eder.
 
 
 def reset_localstorage():
-    """localStorage'daki ünvan verisini temizler."""
     components.html("""
     <script>
     (function() {
@@ -691,7 +681,6 @@ with tab_panel:
         if st.button("🗑 Tüm ünvan atamalarını sıfırla", key="reset_unvanlar"):
             st.session_state["unvan_map"] = {}
             reset_localstorage()
-            # URL'deki query param'ı da temizle
             st.query_params.clear()
             st.rerun()
 
@@ -820,9 +809,8 @@ with tab_evrak:
         "&nbsp;&nbsp;• <b>Diğer tüm belgeler</b> → <b>5 yıl</b> geçerli"
         "</div>", unsafe_allow_html=True)
 
-    # session_state: manuel girilen tarihler
     if "manuel_tarihler" not in st.session_state:
-        st.session_state["manuel_tarihler"] = {}  # key: (ad, evrak) → {"baslangic": date, "bitis": date}
+        st.session_state["manuel_tarihler"] = {}
 
     col_g1, col_g2 = st.columns([1,1])
     with col_g1:
@@ -832,7 +820,7 @@ with tab_evrak:
         secilen_personel = st.selectbox(
             "Personel", ["(Seçin)"] + personel_listesi, key="giris_personel")
 
-        # ── Evrak seçimi (mevcut + manuel yeni) ─────────────────────────────
+        # ── Evrak seçimi (dropdown + manuel yeni giriş) ────────────────────
         YENI_EVRAK_SECENEGI = "✏️ (Yeni belge adı gir...)"
         if secilen_personel != "(Seçin)":
             personel_evraklari = sorted(
@@ -859,9 +847,8 @@ with tab_evrak:
         else:
             secilen_evrak = secilen_evrak_goster
 
-        # Tarih girişi
+        # Tarih girişi (hem mevcut hem yeni evrak için)
         if secilen_personel != "(Seçin)" and secilen_evrak:
-            # Mevcut değeri bul (manuel kayıt veya Excel'deki)
             key_mt = (secilen_personel, secilen_evrak)
             mevcut_bas = st.session_state["manuel_tarihler"].get(key_mt, {}).get("baslangic")
             if mevcut_bas is None:
@@ -879,7 +866,6 @@ with tab_evrak:
                 key="giris_tarih",
             )
 
-            # Süre ve bitiş hesapla
             sure_yil = 2 if is_saglik_belgesi(secilen_evrak) else 5
             hesaplanan_bitis = hesapla_bitis(yenileme_tarihi, secilen_evrak)
 
@@ -1011,7 +997,6 @@ with tab_grafik:
         )
         st.plotly_chart(fig_stacked, use_container_width=True)
 
-    # Özet istatistik tablosu
     st.markdown("<div class='section-label'>🔢 Özet İstatistikler</div>", unsafe_allow_html=True)
     ozet = pd.DataFrame({
         "Metrik": [
