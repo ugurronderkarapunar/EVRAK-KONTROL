@@ -668,20 +668,54 @@ with tab_panel:
             "Her personel için doğru ünvanı seçin. Değişiklikler anında tabloya yansır."
             "</div>", unsafe_allow_html=True)
 
-        ca1, ca2, ca3 = st.columns([2,2,3])
+        # ── Seçili kişilere ünvan ata ────────────────────────────────────────────
+        st.markdown("**🎯 Seçili Kişilere Ünvan Ata**")
+        sa1, sa2, sa3 = st.columns([3, 2, 2])
+        with sa1:
+            secili_kisiler = st.multiselect(
+                "Kişi(ler) seç:",
+                options=personel_listesi,
+                placeholder="İsim yazın veya listeden seçin…",
+                key="secili_kisiler_ms",
+            )
+        with sa2:
+            secim_unvan = st.selectbox(
+                "Ünvan:",
+                ["(Seçin)"] + UNVAN_LISTESI[1:],
+                key="secim_unvan_sel",
+            )
+        with sa3:
+            st.markdown("<br>", unsafe_allow_html=True)
+            if st.button("✅ Seçililere Ata", key="secili_ata", use_container_width=True):
+                if secim_unvan != "(Seçin)" and secili_kisiler:
+                    for p in secili_kisiler:
+                        st.session_state["unvan_map"][p] = secim_unvan
+                    localStorage_yazici(st.session_state["unvan_map"])
+                    st.success(f"✅ {len(secili_kisiler)} kişiye **{secim_unvan}** atandı.")
+                    st.rerun()
+                elif not secili_kisiler:
+                    st.warning("Lütfen en az bir kişi seçin.")
+                else:
+                    st.warning("Lütfen bir ünvan seçin.")
+
+        st.markdown("---")
+
+        # ── Toplu atama (tüm liste) ────────────────────────────────────────────
+        st.markdown("**⚡ Toplu Atama (Tüm Liste)**")
+        ca1, ca2, ca3 = st.columns([2, 2, 3])
         with ca1:
-            bulk_unvan = st.selectbox("Toplu ata:", ["(Seçin)"] + UNVAN_LISTESI[1:], key="bulk_unvan_sel")
+            bulk_unvan = st.selectbox("Ünvan:", ["(Seçin)"] + UNVAN_LISTESI[1:], key="bulk_unvan_sel")
         with ca2:
-            bulk_target = st.selectbox("Kimlere?", ["Atanmamış olanlara","Tüm personele"], key="bulk_target_sel")
+            bulk_target = st.selectbox("Kimlere?", ["Atanmamış olanlara", "Tüm personele"], key="bulk_target_sel")
         with ca3:
             st.markdown("<br>", unsafe_allow_html=True)
-            if st.button("⚡ Toplu Uygula", key="bulk_apply"):
+            if st.button("⚡ Toplu Uygula", key="bulk_apply", use_container_width=True):
                 if bulk_unvan != "(Seçin)":
                     for p in personel_listesi:
-                        if bulk_target == "Tüm personele" or st.session_state["unvan_map"].get(p,"— Atanmadı —") == "— Atanmadı —":
+                        if bulk_target == "Tüm personele" or st.session_state["unvan_map"].get(p, "— Atanmadı —") == "— Atanmadı —":
                             st.session_state["unvan_map"][p] = bulk_unvan
-                localStorage_yazici(st.session_state["unvan_map"])
-                st.rerun()
+                    localStorage_yazici(st.session_state["unvan_map"])
+                    st.rerun()
 
         st.markdown("---")
         cols_per_row = 3
