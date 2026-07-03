@@ -2,11 +2,12 @@
 ⚓ Gemi Personeli Nitelik Belgesi Takip Sistemi
 ================================================
 Yazar      : Claude (Anthropic)
-Versiyon   : 1.3.1
+Versiyon   : 1.4.0
 Açıklama   : Personele ait nitelik belgelerinin bitiş tarihlerini izler,
              cari ay içinde süresi dolacak evrakları dinamik uyarılarla
              ve filtrelenebilir tablolarla kullanıcıya sunar.
-             v1.3.1: localStorage okuma sayfa yenileme sorunu düzeltildi.
+             v1.4.0: Excel dosyası diske kaydedilir, ünvan ve manuel tarihler
+                     tarayıcıda kalıcıdır. Tek seferlik kurulum yeterli.
 Bağımlılıklar: streamlit, pandas, openpyxl, xlrd, plotly
 """
 
@@ -15,10 +16,43 @@ import pandas as pd
 import datetime
 import calendar
 import io
+import os
 import plotly.express as px
 import plotly.graph_objects as go
 import streamlit.components.v1 as components
 import json
+
+# ──────────────────────────────────────────────────────────────────────────────
+# SABİTLER
+# ──────────────────────────────────────────────────────────────────────────────
+SAVED_EXCEL_PATH = "saved_upload.xlsx"   # Kayıtlı Excel dosyası yolu
+
+UNVAN_LISTESI = [
+    "— Atanmadı —",
+    "Kaptan",
+    "Başmakinist",
+    "Güverte L.",
+    "Gemici",
+    "Yağcı",
+    "Diğer",
+]
+
+SAGLIK_ANAHTAR_KELIMELER = ["sağlık", "saglik", "health", "yoklama"]
+
+PLOTLY_LAYOUT = dict(
+    paper_bgcolor="rgba(17,34,54,0.0)",
+    plot_bgcolor="rgba(17,34,54,0.0)",
+    font=dict(color="#E8EDF3", family="Inter"),
+    margin=dict(l=16, r=16, t=36, b=16),
+)
+
+DURUM_RENKLERI = {
+    "🔴 Süresi Dolmuş":   "#E74C3C",
+    "🟠 Bu Hafta Bitiyor": "#E67E22",
+    "🟡 Bu Ay Bitiyor":    "#F1C40F",
+    "🟢 Geçerli":          "#2ECC71",
+    "⚪ Bilinmiyor":        "#95A5A6",
+}
 
 # ──────────────────────────────────────────────────────────────────────────────
 # SAYFA YAPILANDIRMASI
@@ -137,45 +171,9 @@ hr { border-color: #1E3A52 !important; }
     font-weight: 600; padding: 6px 18px;
 }
 .stButton > button:hover { background: #2A5280; color: #FFD966; border-color: #4A7FA5; }
-/* Plotly grafik arka planını şeffaf yap */
 .js-plotly-plot { border-radius: 12px; overflow: hidden; }
 </style>
 """, unsafe_allow_html=True)
-
-
-# ──────────────────────────────────────────────────────────────────────────────
-# SABİTLER
-# ──────────────────────────────────────────────────────────────────────────────
-
-UNVAN_LISTESI = [
-    "— Atanmadı —",
-    "Kaptan",
-    "Başmakinist",
-    "Güverte L.",
-    "Gemici",
-    "Yağcı",
-    "Diğer",
-]
-
-# Evrak adında bu kelime geçiyorsa → 2 yıl geçerli, diğerleri → 5 yıl
-SAGLIK_ANAHTAR_KELIMELER = ["sağlık", "saglik", "health", "yoklama"]
-
-PLOTLY_LAYOUT = dict(
-    paper_bgcolor="rgba(17,34,54,0.0)",
-    plot_bgcolor="rgba(17,34,54,0.0)",
-    font=dict(color="#E8EDF3", family="Inter"),
-    margin=dict(l=16, r=16, t=36, b=16),
-)
-# Grafik içinde legend gerekirse ayrıca geçilir
-LEGEND_STYLE = dict(bgcolor="rgba(0,0,0,0)", bordercolor="rgba(0,0,0,0)")
-
-DURUM_RENKLERI = {
-    "🔴 Süresi Dolmuş":   "#E74C3C",
-    "🟠 Bu Hafta Bitiyor": "#E67E22",
-    "🟡 Bu Ay Bitiyor":    "#F1C40F",
-    "🟢 Geçerli":          "#2ECC71",
-    "⚪ Bilinmiyor":        "#95A5A6",
-}
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -217,6 +215,7 @@ def hesapla_bitis(baslangic: datetime.date, evrak_adi: str) -> datetime.date:
 
 
 def load_excel(file):
+    """Dosya objesinden DataFrame okur."""
     raw = file.read(); file.seek(0)
     magic = raw[:8]
     if magic == b'\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1':
@@ -316,35 +315,47 @@ def make_download_excel(df: pd.DataFrame) -> bytes:
     return out.getvalue()
 
 
-def get_unvan(ad):
-    return st.session_state["unvan_map"].get(ad, "— Atanmadı —")
+# ──────────────────────────────────────────────────────────────────────────────
+# LOCALSTORAGE İŞLEVLERİ (Ünvan + Manuel Tarihler)
+# ──────────────────────────────────────────────────────────────────────────────
+
+def ls_get(key: str, default=None):
+    """localStorage'dan JSON veri okur, Streamlit'e taşır."""
+    # Bu bileşen iki aşamalı çalışır: önce None, sonra değer döner.
+    val = components.html(f"""
+    <script>
+    (function() {{
+        var data = '';
+        try {{ data = localStorage.getItem('{key}') || ''; }} catch(e) {{}}
+        window.parent.postMessage({{
+            type: 'streamlit:setComponentValue',
+            value: data
+        }}, '*');
+    }})();
+    </script>
+    """, height=0)
+    if val:
+        try: return json.loads(val)
+        except: return default
+    return None
 
 
-def localStorage_yazici(unvan_map: dict):
-    """Güncel unvan_map'i tarayıcının localStorage'ına kaydeder."""
-    json_str = json.dumps(unvan_map, ensure_ascii=False)
-    # Kaçış karakterlerini JS için temizle
-    json_str_escaped = json_str.replace("'", "\'")
+def ls_set(key: str, value: dict):
+    """localStorage'a JSON yazar."""
+    json_str = json.dumps(value, ensure_ascii=False).replace("'", "\\'")
     components.html(f"""
     <script>
     (function() {{
-        try {{
-            localStorage.setItem('nitelik_unvan_map', '{json_str_escaped}');
-        }} catch(e) {{
-            console.warn('localStorage yazma hatası:', e);
-        }}
+        try {{ localStorage.setItem('{key}', '{json_str}'); }} catch(e) {{ console.warn(e); }}
     }})();
     </script>
     """, height=0)
 
 
-def localStorage_temizleyici():
-    """localStorage'daki unvan_map verisini siler."""
-    components.html("""
+def ls_remove(key: str):
+    components.html(f"""
     <script>
-    (function() {
-        localStorage.removeItem('nitelik_unvan_map');
-    })();
+    (function() {{ localStorage.removeItem('{key}'); }})();
     </script>
     """, height=0)
 
@@ -354,16 +365,13 @@ def localStorage_temizleyici():
 # ──────────────────────────────────────────────────────────────────────────────
 
 def grafik_durum_pasta(df: pd.DataFrame):
-    """Tüm evrakların durum dağılımı — pasta grafik."""
     counts = df["Durum"].value_counts().reset_index()
     counts.columns = ["Durum", "Adet"]
     renkler = [DURUM_RENKLERI.get(d, "#95A5A6") for d in counts["Durum"]]
     fig = go.Figure(go.Pie(
         labels=counts["Durum"], values=counts["Adet"],
-        marker_colors=renkler,
-        hole=0.55,
-        textinfo="percent+value",
-        textfont_size=12,
+        marker_colors=renkler, hole=0.55,
+        textinfo="percent+value", textfont_size=12,
         hovertemplate="<b>%{label}</b><br>%{value} evrak (%{percent})<extra></extra>",
     ))
     fig.update_layout(
@@ -377,39 +385,31 @@ def grafik_durum_pasta(df: pd.DataFrame):
 
 
 def grafik_aylik_bitis(df: pd.DataFrame):
-    """Önümüzdeki 12 ay boyunca biten evrak sayısı — bar grafik."""
     today = datetime.date.today()
     TR_AYLAR = ["","Oca","Şub","Mar","Nis","May","Haz","Tem","Ağu","Eyl","Eki","Kas","Ara"]
     ay_labels, ay_counts, ay_renkler = [], [], []
-
     for i in range(12):
         mo = today.month - 1 + i
         y, m = today.year + mo // 12, mo % 12 + 1
         fd, ld = get_month_range(y, m)
-        cnt = df["Bitiş Tarihi"].apply(
-            lambda d: d is not None and fd <= d <= ld).sum()
+        cnt = df["Bitiş Tarihi"].apply(lambda d: d is not None and fd <= d <= ld).sum()
         ay_labels.append(f"{TR_AYLAR[m]}\n{y}")
         ay_counts.append(int(cnt))
         ay_renkler.append("#E74C3C" if i == 0 else "#2980B9" if i <= 2 else "#1A5276")
-
     fig = go.Figure(go.Bar(
-        x=ay_labels, y=ay_counts,
-        marker_color=ay_renkler,
+        x=ay_labels, y=ay_counts, marker_color=ay_renkler,
         text=ay_counts, textposition="outside",
         textfont=dict(color="#E8EDF3", size=11),
-        hovertemplate="<b>%{x}</b><br>%{y} evrak bitiyor<extra></extra>",
     ))
     fig.update_layout(
         title=dict(text="📅 Aylık Bitiş Takvimi (12 Ay)", font=dict(size=14, color="#F0C040")),
-        xaxis=dict(gridcolor="#1E3A52", tickfont=dict(size=10)),
-        yaxis=dict(gridcolor="#1E3A52", tickfont=dict(size=10)),
+        xaxis=dict(gridcolor="#1E3A52"), yaxis=dict(gridcolor="#1E3A52"),
         **PLOTLY_LAYOUT,
     )
     return fig
 
 
 def grafik_unvan_dagilim(df: pd.DataFrame):
-    """Ünvana göre evrak sayısı — yatay bar."""
     unvan_counts = (df[df["Ünvan"] != "— Atanmadı —"]
                     .groupby("Ünvan").size().reset_index(name="Adet")
                     .sort_values("Adet", ascending=True))
@@ -417,49 +417,51 @@ def grafik_unvan_dagilim(df: pd.DataFrame):
         return None
     fig = go.Figure(go.Bar(
         x=unvan_counts["Adet"], y=unvan_counts["Ünvan"],
-        orientation="h",
-        marker_color="#2980B9",
+        orientation="h", marker_color="#2980B9",
         text=unvan_counts["Adet"], textposition="outside",
         textfont=dict(color="#E8EDF3", size=11),
-        hovertemplate="<b>%{y}</b><br>%{x} evrak<extra></extra>",
     ))
     fig.update_layout(
         title=dict(text="👤 Ünvana Göre Evrak Dağılımı", font=dict(size=14, color="#F0C040")),
-        xaxis=dict(gridcolor="#1E3A52"),
-        yaxis=dict(gridcolor="#1E3A52"),
         **PLOTLY_LAYOUT,
     )
     return fig
 
 
 def grafik_kritik_personel(df: pd.DataFrame):
-    """En fazla kritik evrakı olan personel — top 10 bar."""
     kritik = df[df["Durum"].isin(["🔴 Süresi Dolmuş","🟠 Bu Hafta Bitiyor","🟡 Bu Ay Bitiyor"])]
     if kritik.empty:
         return None
     top = (kritik.groupby("Adı Soyadı").size()
            .reset_index(name="Kritik Evrak")
-           .sort_values("Kritik Evrak", ascending=True)
-           .tail(10))
+           .sort_values("Kritik Evrak", ascending=True).tail(10))
     fig = go.Figure(go.Bar(
         x=top["Kritik Evrak"], y=top["Adı Soyadı"],
-        orientation="h",
-        marker_color="#E74C3C",
+        orientation="h", marker_color="#E74C3C",
         text=top["Kritik Evrak"], textposition="outside",
-        textfont=dict(color="#E8EDF3", size=11),
-        hovertemplate="<b>%{y}</b><br>%{x} kritik evrak<extra></extra>",
     ))
     fig.update_layout(
         title=dict(text="🚨 En Kritik 10 Personel", font=dict(size=14, color="#F0C040")),
-        xaxis=dict(gridcolor="#1E3A52"),
-        yaxis=dict(gridcolor="#1E3A52"),
         **PLOTLY_LAYOUT,
     )
     return fig
 
 
 # ──────────────────────────────────────────────────────────────────────────────
-# SIDEBAR
+# OTURUM DURUMU İLK YÜKLEME (localStorage → session_state)
+# ──────────────────────────────────────────────────────────────────────────────
+
+if "unvan_map" not in st.session_state:
+    # localStorage'dan oku
+    val = ls_get("nitelik_unvan_map", {})
+    st.session_state["unvan_map"] = val if val else {}
+
+if "manuel_tarihler" not in st.session_state:
+    val = ls_get("nitelik_manuel_tarihler", {})
+    st.session_state["manuel_tarihler"] = val if val else {}
+
+# ──────────────────────────────────────────────────────────────────────────────
+# SİDEBAR
 # ──────────────────────────────────────────────────────────────────────────────
 with st.sidebar:
     st.markdown(
@@ -470,11 +472,37 @@ with st.sidebar:
     )
 
     st.markdown("<div class='section-label'>📂 Veri Kaynağı</div>", unsafe_allow_html=True)
+    
+    # Kayıtlı dosya kontrolü
+    saved_exists = os.path.exists(SAVED_EXCEL_PATH)
+    if saved_exists:
+        st.success(f"✅ Kayıtlı Excel bulundu ({SAVED_EXCEL_PATH})")
+    else:
+        st.info("Henüz kayıtlı Excel yok, lütfen dosya yükleyin.")
+
     uploaded_file = st.file_uploader(
-        label="Excel dosyasını buraya sürükleyin",
+        label="Excel dosyasını yükleyin (yeni dosya seçerseniz eskisinin yerine geçer)",
         type=["xlsx","xls"],
         help="Beklenen sütunlar: Adı Soyadı, Sicil No, Evrak Adı, Başlangıç Tarihi, Bitiş Tarihi",
     )
+
+    if uploaded_file is not None:
+        # Dosyayı diske kaydet
+        with open(SAVED_EXCEL_PATH, "wb") as f:
+            f.write(uploaded_file.getbuffer())
+        st.success("Yeni Excel dosyası kaydedildi.")
+        # session_state'te işaretleyelim ki hemen kullanalım
+        st.session_state["excel_dosya"] = uploaded_file
+        # Manuel dosya yükleme tamam, dosya var olacak
+        saved_exists = True
+
+    # Silme butonu
+    if saved_exists:
+        if st.button("🗑 Kayıtlı Excel'i sil ve sıfırla"):
+            if os.path.exists(SAVED_EXCEL_PATH):
+                os.remove(SAVED_EXCEL_PATH)
+            st.success("Kayıtlı Excel silindi. Sayfa yeniden yükleniyor...")
+            st.rerun()
 
     st.markdown("<br>", unsafe_allow_html=True)
     st.markdown("<div class='section-label'>📅 Kontrol Dönemi</div>", unsafe_allow_html=True)
@@ -498,60 +526,37 @@ with st.sidebar:
     st.markdown("---")
     st.markdown(
         "<div style='font-size:0.72rem;color:#4A7FA5;text-align:center;'>"
-        "v1.3.1 · Nitelik Belgesi Takip Sistemi<br>Streamlit + pandas + plotly"
+        "v1.4.0 · Nitelik Belgesi Takip Sistemi<br>Streamlit + pandas + plotly"
         "</div>", unsafe_allow_html=True,
     )
 
 
 # ──────────────────────────────────────────────────────────────────────────────
-# HERO BAŞLIK
+# VERİYİ HAZIRLAMA (Excel varsa oku, yoksa dur)
 # ──────────────────────────────────────────────────────────────────────────────
-st.markdown(
-    f"""<div class="hero-block">
-        <div class="hero-title">Nitelik Belgesi Takip Sistemi</div>
-        <p class="hero-sub">Gemi personeline ait nitelik belgelerinin bitiş tarihlerini izler.
-        Cari ay içinde süresi dolacak kritik evrakları anında tespit eder.
-        <span style="color:#F0C040;font-weight:600;">&nbsp;·&nbsp; {first_day.strftime('%B %Y')} dönemi aktif.</span>
-        </p></div>""",
-    unsafe_allow_html=True,
-)
+def get_dataframe():
+    """Kayıtlı Excel veya yüklenen dosyadan DataFrame döndür."""
+    if os.path.exists(SAVED_EXCEL_PATH):
+        # Diskten oku
+        try:
+            with open(SAVED_EXCEL_PATH, "rb") as f:
+                return load_excel(f)
+        except Exception as e:
+            st.error(f"Kayıtlı Excel okunamadı: {e}")
+            return None
+    return None
 
-# ── Dosya yüklenmemişse ───────────────────────────────────────────────────────
-if uploaded_file is None:
+
+df_raw = get_dataframe()
+if df_raw is None:
     st.markdown("""
     <div class="alert-info">
-    <b>📂 Başlamak için sol panelden Excel dosyanızı yükleyin.</b><br><br>
-    Dosyanızda şu sütunlar bulunmalıdır:<br>
-    &nbsp;&nbsp;• <b>Adı Soyadı</b> — personelin tam adı<br>
-    &nbsp;&nbsp;• <b>Sicil No</b> — personel sicil numarası (isteğe bağlı)<br>
-    &nbsp;&nbsp;• <b>Evrak Adı</b> — belgenin adı<br>
-    &nbsp;&nbsp;• <b>Başlangıç Tarihi</b> — belgenin başlangıç tarihi (isteğe bağlı)<br>
-    &nbsp;&nbsp;• <b>Bitiş Tarihi</b> — belgenin bitiş tarihi <span style="color:#F0C040;">(zorunlu)</span>
+    <b>📂 Başlamak için lütfen sol panelden bir Excel dosyası yükleyin.</b><br><br>
+    Dosya yüklendikten sonra otomatik kaydedilecek ve sonraki ziyaretlerinizde tekrar yüklemenize gerek kalmayacak.
     </div>""", unsafe_allow_html=True)
-
-    st.markdown("#### 📥 Örnek Excel Şablonu")
-    sample_df = pd.DataFrame({
-        "Adı Soyadı": ["Ahmet Yılmaz","Mehmet Demir","Ali Kaya"],
-        "Sicil No": ["001","002","003"],
-        "Evrak Adı": ["STCW Güvenlik","Gemiadamları Sağlık Yoklama Belgesi","Vardiya Zabiti"],
-        "Başlangıç Tarihi": ["01.07.2023","15.03.2024","10.01.2022"],
-        "Bitiş Tarihi": [
-            today.strftime("%d.%m.%Y"),
-            (today + datetime.timedelta(days=10)).strftime("%d.%m.%Y"),
-            (today + datetime.timedelta(days=90)).strftime("%d.%m.%Y"),
-        ],
-    })
-    st.download_button("⬇️ Örnek şablonu indir (.xlsx)", make_download_excel(sample_df),
-                       "ornek_sablon.xlsx",
-                       "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
     st.stop()
 
-
-# ──────────────────────────────────────────────────────────────────────────────
-# VERİ YÜKLEME
-# ──────────────────────────────────────────────────────────────────────────────
-df_raw = load_excel(uploaded_file)
-if df_raw is None: st.stop()
+# Normalize, tarihleri parse et, hesapla
 df = normalize_columns(df_raw)
 if df is None: st.stop()
 df = parse_dates(df)
@@ -560,39 +565,9 @@ df["Durum"] = df["Kalan Gün"].apply(get_status_label)
 
 personel_listesi = sorted(df["Adı Soyadı"].dropna().unique().tolist())
 
-# ── Kalıcı ünvan haritası: localStorage ↔ session_state ──────────────────────
-if "unvan_map" not in st.session_state:
-    st.session_state["unvan_map"] = {}
-if "ls_yuklendi" not in st.session_state:
-    st.session_state["ls_yuklendi"] = False
-
-# localStorage'dan veriyi oku (sayfa yenilemeden, sadece rerun ile)
-if not st.session_state["ls_yuklendi"]:
-    # Bu bileşen localStorage'daki JSON'u okur ve Streamlit'e gönderir.
-    # İlk çalıştırmada None döner; JS çalışıp değer gönderdiğinde Streamlit otomatik rerun yapar.
-    ls_value = components.html("""
-        <script>
-        (function() {
-            var data = '';
-            try { data = localStorage.getItem('nitelik_unvan_map') || ''; } catch(e) {}
-            window.parent.postMessage({
-                type: 'streamlit:setComponentValue',
-                value: data
-            }, '*');
-        })();
-        </script>
-    """, height=0)
-
-    # Bileşen ikinci çalıştırmada gerçek değeri döndürdüğünde işle
-    if ls_value:
-        try:
-            yuklu = json.loads(ls_value)
-            if isinstance(yuklu, dict) and yuklu:
-                st.session_state["unvan_map"] = yuklu
-        except Exception:
-            pass
-        st.session_state["ls_yuklendi"] = True
-        st.rerun()  # Güncel haritayla sayfayı yeniden çalıştır
+# Ünvanları ekle (get_unvan fonksiyonu session_state'teki map'i kullanır)
+def get_unvan(ad):
+    return st.session_state["unvan_map"].get(ad, "— Atanmadı —")
 
 df.insert(0, "Ünvan", df["Adı Soyadı"].apply(get_unvan))
 df_month   = filter_by_month(df, sel_year, sel_month)
@@ -625,10 +600,9 @@ with tab_panel:
     with st.expander(expander_baslik, expanded=(atanmamis_sayisi > 0)):
         st.markdown(
             "<div style='font-size:0.85rem;color:#8BAEC8;margin-bottom:14px;'>"
-            "Her personel için doğru ünvanı seçin. Değişiklikler anında tabloya yansır."
+            "Her personel için doğru ünvanı seçin. Değişiklikler anında tabloya yansır ve tarayıcı hafızasında saklanır."
             "</div>", unsafe_allow_html=True)
 
-        # ── Seçili kişilere ünvan ata ────────────────────────────────────────────
         st.markdown("**🎯 Seçili Kişilere Ünvan Ata**")
         sa1, sa2, sa3 = st.columns([3, 2, 2])
         with sa1:
@@ -650,7 +624,7 @@ with tab_panel:
                 if secim_unvan != "(Seçin)" and secili_kisiler:
                     for p in secili_kisiler:
                         st.session_state["unvan_map"][p] = secim_unvan
-                    localStorage_yazici(st.session_state["unvan_map"])
+                    ls_set("nitelik_unvan_map", st.session_state["unvan_map"])
                     st.success(f"✅ {len(secili_kisiler)} kişiye **{secim_unvan}** atandı.")
                     st.rerun()
                 elif not secili_kisiler:
@@ -659,8 +633,6 @@ with tab_panel:
                     st.warning("Lütfen bir ünvan seçin.")
 
         st.markdown("---")
-
-        # ── Toplu atama (tüm liste) ────────────────────────────────────────────
         st.markdown("**⚡ Toplu Atama (Tüm Liste)**")
         ca1, ca2, ca3 = st.columns([2, 2, 3])
         with ca1:
@@ -674,7 +646,7 @@ with tab_panel:
                     for p in personel_listesi:
                         if bulk_target == "Tüm personele" or st.session_state["unvan_map"].get(p, "— Atanmadı —") == "— Atanmadı —":
                             st.session_state["unvan_map"][p] = bulk_unvan
-                    localStorage_yazici(st.session_state["unvan_map"])
+                    ls_set("nitelik_unvan_map", st.session_state["unvan_map"])
                     st.rerun()
 
         st.markdown("---")
@@ -689,15 +661,15 @@ with tab_panel:
                     secim  = col.selectbox(personel, UNVAN_LISTESI, index=idx, key=f"unvan_{personel}")
                     if secim != st.session_state["unvan_map"].get(personel):
                         st.session_state["unvan_map"][personel] = secim
-                        localStorage_yazici(st.session_state["unvan_map"])
+                        ls_set("nitelik_unvan_map", st.session_state["unvan_map"])
 
         st.markdown("---")
         if st.button("🗑 Tüm ünvan atamalarını sıfırla", key="reset_unvanlar"):
             st.session_state["unvan_map"] = {}
-            localStorage_temizleyici()
+            ls_remove("nitelik_unvan_map")
             st.rerun()
 
-    # Ünvanları güncelle
+    # Güncellenmiş ünvanları tabloya yansıt
     df["Ünvan"]         = df["Adı Soyadı"].apply(get_unvan)
     df_month["Ünvan"]   = df_month["Adı Soyadı"].apply(get_unvan)
     df_display["Ünvan"] = df_display["Adı Soyadı"].apply(get_unvan)
@@ -725,13 +697,13 @@ with tab_panel:
 
     # ── Uyarı Kutuları ───────────────────────────────────────────────────────
     if dolmus > 0:
-        st.markdown(f"<div class='alert-critical'>🚨 <b>ACİL:</b> <b>{dolmus}</b> adet evrakın süresi dolmuş! İvedilikle yenilenmesi gerekmektedir.</div>", unsafe_allow_html=True)
+        st.markdown(f"<div class='alert-critical'>🚨 <b>ACİL:</b> <b>{dolmus}</b> adet evrakın süresi dolmuş!</div>", unsafe_allow_html=True)
     if bu_hafta > 0:
         st.markdown(f"<div class='alert-warning'>⚠️ <b>DİKKAT:</b> <b>{bu_hafta}</b> adet evrak bu hafta sona eriyor.</div>", unsafe_allow_html=True)
     if ay_biten > 0 and dolmus == 0 and bu_hafta == 0:
-        st.markdown(f"<div class='alert-warning'>⚠️ <b>UYARI:</b> Bu ay toplam <b>{ay_biten}</b> adet evrakın süresi dolacak.</div>", unsafe_allow_html=True)
+        st.markdown(f"<div class='alert-warning'>⚠️ Bu ay <b>{ay_biten}</b> evrak süresi dolacak.</div>", unsafe_allow_html=True)
     if ay_biten == 0:
-        st.markdown("<div class='alert-ok'>✅ <b>Bu ay süresi dolacak evrak bulunmuyor.</b></div>", unsafe_allow_html=True)
+        st.markdown("<div class='alert-ok'>✅ Bu ay süresi dolacak evrak yok.</div>", unsafe_allow_html=True)
 
     # ── Filtreler ────────────────────────────────────────────────────────────
     st.markdown("<div class='section-label'>🔍 Tablo Filtreleri</div>", unsafe_allow_html=True)
@@ -752,7 +724,6 @@ with tab_panel:
     if sel_durum  != "(Hepsi)": df_filtered = df_filtered[df_filtered["Durum"] == sel_durum]
     if sel_unvan_f != "(Hepsi)": df_filtered = df_filtered[df_filtered["Ünvan"] == sel_unvan_f]
 
-    # ── Tablo ────────────────────────────────────────────────────────────────
     st.markdown(
         f"<div class='section-label'>📋 {first_day.strftime('%B %Y')} — "
         f"Süresi Dolan / Dolacak Evraklar ({len(df_filtered)} kayıt)</div>",
@@ -787,7 +758,6 @@ with tab_panel:
                            f"kritik_evraklar_{today.strftime('%Y%m%d')}.xlsx",
                            "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
 
-    # ── Tüm liste expander ───────────────────────────────────────────────────
     with st.expander("📄 Tüm evrak listesini göster (tüm aylar)"):
         show_all = [c for c in ["Ünvan","Adı Soyadı","Sicil No","Evrak Adı",
                                  "Başlangıç Tarihi","Bitiş Tarihi","Kalan Gün","Durum"]
@@ -816,15 +786,10 @@ with tab_evrak:
         unsafe_allow_html=True)
     st.markdown(
         "<div class='alert-info'>"
-        "Aşağıda bir personel ve evrak seçin, <b>giriş/yenileme tarihini</b> girin. "
-        "Sistem bitiş tarihini otomatik hesaplar:<br>"
-        "&nbsp;&nbsp;• <b>Sağlık Yoklama Belgesi</b> → <b>2 yıl</b> geçerli<br>"
-        "&nbsp;&nbsp;• <b>Diğer tüm belgeler</b> → <b>5 yıl</b> geçerli"
+        "Bir personel ve evrak seçin, <b>giriş/yenileme tarihini</b> girin. "
+        "Sistem bitiş tarihini otomatik hesaplar (Sağlık → 2 yıl, diğer → 5 yıl). "
+        "Girilen tarihler tarayıcı hafızasında kalıcıdır."
         "</div>", unsafe_allow_html=True)
-
-    # session_state: manuel girilen tarihler
-    if "manuel_tarihler" not in st.session_state:
-        st.session_state["manuel_tarihler"] = {}  # key: (ad, evrak) → (baslangic, bitis)
 
     col_g1, col_g2 = st.columns([1,1])
     with col_g1:
@@ -834,7 +799,6 @@ with tab_evrak:
         secilen_personel = st.selectbox(
             "Personel", ["(Seçin)"] + personel_listesi, key="giris_personel")
 
-        # Seçilen personelin evrakları
         if secilen_personel != "(Seçin)":
             personel_evraklari = sorted(
                 df[df["Adı Soyadı"] == secilen_personel]["Evrak Adı"].dropna().unique().tolist()
@@ -845,13 +809,10 @@ with tab_evrak:
             secilen_evrak = "(Seçin)"
             st.selectbox("Evrak", ["(Seçin)"], key="giris_evrak_bos", disabled=True)
 
-        # Tarih girişi
         if secilen_personel != "(Seçin)" and secilen_evrak != "(Seçin)":
-            # Mevcut değeri bul
             key_mt = (secilen_personel, secilen_evrak)
             mevcut_bas = st.session_state["manuel_tarihler"].get(key_mt, {}).get("baslangic")
             if mevcut_bas is None:
-                # Excel'deki mevcut başlangıç tarihini default al
                 satir = df[(df["Adı Soyadı"] == secilen_personel) &
                            (df["Evrak Adı"]  == secilen_evrak)]
                 if not satir.empty and satir.iloc[0]["Başlangıç Tarihi"] is not None:
@@ -866,7 +827,6 @@ with tab_evrak:
                 key="giris_tarih",
             )
 
-            # Süre ve bitiş hesapla
             sure_yil = 2 if is_saglik_belgesi(secilen_evrak) else 5
             hesaplanan_bitis = hesapla_bitis(yenileme_tarihi, secilen_evrak)
 
@@ -883,6 +843,7 @@ with tab_evrak:
                     "baslangic": yenileme_tarihi,
                     "bitis":     hesaplanan_bitis,
                 }
+                ls_set("nitelik_manuel_tarihler", st.session_state["manuel_tarihler"])
                 st.success(f"✅ {secilen_personel} — {secilen_evrak}: {yenileme_tarihi.strftime('%d.%m.%Y')} → {hesaplanan_bitis.strftime('%d.%m.%Y')} kaydedildi.")
 
         st.markdown("</div>", unsafe_allow_html=True)
@@ -912,7 +873,6 @@ with tab_evrak:
             mt_df = pd.DataFrame(mt_rows).sort_values("Kalan Gün", ascending=True)
             st.dataframe(mt_df, use_container_width=True, hide_index=True, height=340)
 
-            # İndir
             st.download_button(
                 "⬇️ Manuel tarihleri Excel olarak indir",
                 make_download_excel(mt_df),
@@ -923,6 +883,7 @@ with tab_evrak:
 
             if st.button("🗑 Tüm manuel tarihleri sıfırla", key="reset_manuel"):
                 st.session_state["manuel_tarihler"] = {}
+                ls_remove("nitelik_manuel_tarihler")
                 st.rerun()
 
         st.markdown("</div>", unsafe_allow_html=True)
@@ -935,7 +896,6 @@ with tab_grafik:
 
     st.markdown("<div class='section-label'>📊 Evrak Durum Analizi</div>", unsafe_allow_html=True)
 
-    # Satır 1: Pasta + Aylık Bar
     g1, g2 = st.columns([1, 1.6])
     with g1:
         fig_pasta = grafik_durum_pasta(df)
@@ -946,73 +906,51 @@ with tab_grafik:
 
     st.markdown("<br>", unsafe_allow_html=True)
 
-    # Satır 2: Ünvan dağılım + Kritik personel
     g3, g4 = st.columns(2)
     with g3:
         fig_unvan = grafik_unvan_dagilim(df)
         if fig_unvan:
             st.plotly_chart(fig_unvan, use_container_width=True)
         else:
-            st.markdown(
-                "<div class='alert-info'>Ünvan ataması yapıldıktan sonra bu grafik görünür.</div>",
-                unsafe_allow_html=True)
+            st.markdown("<div class='alert-info'>Ünvan ataması yapıldıktan sonra grafik görünür.</div>", unsafe_allow_html=True)
     with g4:
         fig_kritik = grafik_kritik_personel(df)
         if fig_kritik:
             st.plotly_chart(fig_kritik, use_container_width=True)
         else:
-            st.markdown(
-                "<div class='alert-ok'>Kritik durumdaki personel bulunmuyor.</div>",
-                unsafe_allow_html=True)
+            st.markdown("<div class='alert-ok'>Kritik durumda personel yok.</div>", unsafe_allow_html=True)
 
     st.markdown("<br>", unsafe_allow_html=True)
 
-    # Satır 3: Evrak türüne göre durum dağılımı (stacked bar)
     st.markdown("<div class='section-label'>📋 Evrak Türüne Göre Durum Dağılımı</div>", unsafe_allow_html=True)
-
-    evrak_durum = (df.groupby(["Evrak Adı","Durum"]).size()
-                   .reset_index(name="Adet"))
-    # Sadece en çok kaydı olan 15 evrak türünü göster
+    evrak_durum = (df.groupby(["Evrak Adı","Durum"]).size().reset_index(name="Adet"))
     top_evraklar = df["Evrak Adı"].value_counts().head(15).index.tolist()
     evrak_durum_top = evrak_durum[evrak_durum["Evrak Adı"].isin(top_evraklar)]
 
     if not evrak_durum_top.empty:
         fig_stacked = px.bar(
-            evrak_durum_top,
-            x="Adet", y="Evrak Adı", color="Durum",
-            orientation="h",
-            color_discrete_map=DURUM_RENKLERI,
-            barmode="stack",
+            evrak_durum_top, x="Adet", y="Evrak Adı", color="Durum",
+            orientation="h", color_discrete_map=DURUM_RENKLERI, barmode="stack",
         )
         fig_stacked.update_layout(
             title=dict(text="En Yaygın 15 Evrak Türü — Durum Dağılımı",
                        font=dict(size=14, color="#F0C040")),
-            xaxis=dict(gridcolor="#1E3A52"),
-            yaxis=dict(gridcolor="#1E3A52", tickfont=dict(size=9)),
+            xaxis=dict(gridcolor="#1E3A52"), yaxis=dict(gridcolor="#1E3A52", tickfont=dict(size=9)),
             legend=dict(orientation="h", y=-0.18, font=dict(size=10),
                     bgcolor="rgba(0,0,0,0)", bordercolor="rgba(0,0,0,0)"),
-            height=480,
-            **PLOTLY_LAYOUT,
+            height=480, **PLOTLY_LAYOUT,
         )
         st.plotly_chart(fig_stacked, use_container_width=True)
 
-    # Özet istatistik tablosu
     st.markdown("<div class='section-label'>🔢 Özet İstatistikler</div>", unsafe_allow_html=True)
     ozet = pd.DataFrame({
         "Metrik": [
-            "Toplam Evrak Kaydı",
-            "Benzersiz Personel",
-            "Benzersiz Evrak Türü",
-            "Süresi Dolmuş",
-            "Bu Hafta Bitiyor (0-7 gün)",
-            "Bu Ay Bitiyor (0-31 gün)",
-            "3 Ay İçinde Bitiyor (0-90 gün)",
-            "Geçerli (>90 gün)",
+            "Toplam Evrak Kaydı", "Benzersiz Personel", "Benzersiz Evrak Türü",
+            "Süresi Dolmuş", "Bu Hafta Bitiyor (0-7 gün)", "Bu Ay Bitiyor (0-31 gün)",
+            "3 Ay İçinde Bitiyor (0-90 gün)", "Geçerli (>90 gün)",
         ],
         "Değer": [
-            len(df),
-            df["Adı Soyadı"].nunique(),
-            df["Evrak Adı"].nunique(),
+            len(df), df["Adı Soyadı"].nunique(), df["Evrak Adı"].nunique(),
             int(df["Kalan Gün"].apply(lambda x: x is not None and x < 0).sum()),
             int(df["Kalan Gün"].apply(lambda x: x is not None and 0 <= x <= 7).sum()),
             int(df["Kalan Gün"].apply(lambda x: x is not None and 0 <= x <= 31).sum()),
