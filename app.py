@@ -17,6 +17,8 @@ import calendar
 import io
 import plotly.express as px
 import plotly.graph_objects as go
+import streamlit.components.v1 as components
+import json
 
 # ──────────────────────────────────────────────────────────────────────────────
 # SAYFA YAPILANDIRMASI
@@ -318,6 +320,62 @@ def get_unvan(ad):
     return st.session_state["unvan_map"].get(ad, "— Atanmadı —")
 
 
+def localStorage_okuyucu():
+    """
+    Tarayıcının localStorage'ından unvan_map verisini okur.
+    Streamlit'e query param üzerinden geri iletir.
+    Sayfa ilk açıldığında (session_state boşken) çalışır.
+    """
+    return components.html("""
+    <script>
+    (function() {
+        const data = localStorage.getItem('nitelik_unvan_map');
+        if (data) {
+            // Streamlit'e mesaj gönder
+            window.parent.postMessage({
+                type: 'streamlit:setComponentValue',
+                value: data
+            }, '*');
+        } else {
+            window.parent.postMessage({
+                type: 'streamlit:setComponentValue',
+                value: ''
+            }, '*');
+        }
+    })();
+    </script>
+    """, height=0)
+
+
+def localStorage_yazici(unvan_map: dict):
+    """Güncel unvan_map'i tarayıcının localStorage'ına kaydeder."""
+    json_str = json.dumps(unvan_map, ensure_ascii=False)
+    # Kaçış karakterlerini JS için temizle
+    json_str_escaped = json_str.replace("'", "\'")
+    components.html(f"""
+    <script>
+    (function() {{
+        try {{
+            localStorage.setItem('nitelik_unvan_map', '{json_str_escaped}');
+        }} catch(e) {{
+            console.warn('localStorage yazma hatası:', e);
+        }}
+    }})();
+    </script>
+    """, height=0)
+
+
+def localStorage_temizleyici():
+    """localStorage'daki unvan_map verisini siler."""
+    components.html("""
+    <script>
+    (function() {
+        localStorage.removeItem('nitelik_unvan_map');
+    })();
+    </script>
+    """, height=0)
+
+
 # ──────────────────────────────────────────────────────────────────────────────
 # GRAFİK FONKSİYONLARI
 # ──────────────────────────────────────────────────────────────────────────────
@@ -528,8 +586,53 @@ df = compute_remaining_days(df)
 df["Durum"] = df["Kalan Gün"].apply(get_status_label)
 
 personel_listesi = sorted(df["Adı Soyadı"].dropna().unique().tolist())
+# ── Kalıcı ünvan haritası: localStorage ↔ session_state köprüsü ─────────────
+# Yöntem:
+#   OKUMA  → Sayfa ilk açıldığında JS, localStorage verisini URL'e (#hash) yazar;
+#             Streamlit bunu query_params üzerinden alır, session_state'e yükler.
+#   YAZMA  → Her ünvan değişikliğinde session_state'teki harita localStorage'a yazılır.
 if "unvan_map" not in st.session_state:
     st.session_state["unvan_map"] = {}
+if "ls_yuklendi" not in st.session_state:
+    st.session_state["ls_yuklendi"] = False
+
+# İlk açılışta: URL query param'dan veri al (JS tarafından yerleştirilmiş)
+if not st.session_state["ls_yuklendi"]:
+    ls_raw = st.query_params.get("_unvan_data", "")
+    if ls_raw:
+        try:
+            yuklu = json.loads(ls_raw)
+            if isinstance(yuklu, dict) and yuklu:
+                st.session_state["unvan_map"] = yuklu
+        except Exception:
+            pass
+    st.session_state["ls_yuklendi"] = True
+
+# JS köprüsü: localStorage → URL query param (sadece ilk çalışmada)
+# Bu bileşen localStorage'dan okur, veriyi URL'e yazar, Streamlit rerun yapar
+components.html("""
+<script>
+(function() {
+    var stored = '';
+    try { stored = localStorage.getItem('nitelik_unvan_map') || ''; } catch(e) {}
+    
+    var currentUrl = new URL(window.parent.location.href);
+    var currentVal = currentUrl.searchParams.get('_unvan_data') || '';
+    
+    // localStorage'da veri var ama URL'de yok (veya farklı) → URL'e ekle & yenile
+    if (stored && stored !== currentVal) {
+        currentUrl.searchParams.set('_unvan_data', stored);
+        window.parent.history.replaceState({}, '', currentUrl.toString());
+        window.parent.location.reload();
+    }
+    // localStorage boş ama URL'de var → temizle
+    if (!stored && currentVal) {
+        currentUrl.searchParams.delete('_unvan_data');
+        window.parent.history.replaceState({}, '', currentUrl.toString());
+    }
+})();
+</script>
+""", height=0)
 
 df.insert(0, "Ünvan", df["Adı Soyadı"].apply(get_unvan))
 df_month   = filter_by_month(df, sel_year, sel_month)
@@ -577,7 +680,8 @@ with tab_panel:
                     for p in personel_listesi:
                         if bulk_target == "Tüm personele" or st.session_state["unvan_map"].get(p,"— Atanmadı —") == "— Atanmadı —":
                             st.session_state["unvan_map"][p] = bulk_unvan
-                    st.rerun()
+                localStorage_yazici(st.session_state["unvan_map"])
+                st.rerun()
 
         st.markdown("---")
         cols_per_row = 3
@@ -591,10 +695,15 @@ with tab_panel:
                     secim  = col.selectbox(personel, UNVAN_LISTESI, index=idx, key=f"unvan_{personel}")
                     if secim != st.session_state["unvan_map"].get(personel):
                         st.session_state["unvan_map"][personel] = secim
+                        localStorage_yazici(st.session_state["unvan_map"])
 
         st.markdown("---")
         if st.button("🗑 Tüm ünvan atamalarını sıfırla", key="reset_unvanlar"):
             st.session_state["unvan_map"] = {}
+            localStorage_temizleyici()
+            # URL'deki query param'ı da temizle
+            if "_unvan_data" in st.query_params:
+                del st.query_params["_unvan_data"]
             st.rerun()
 
     # Ünvanları güncelle
