@@ -2,11 +2,11 @@
 ⚓ Gemi Personeli Nitelik Belgesi Takip Sistemi
 ================================================
 Yazar      : Claude (Anthropic)
-Versiyon   : 1.5.0
+Versiyon   : 1.5.1
 Açıklama   : Personele ait nitelik belgelerinin bitiş tarihlerini izler,
              cari ay içinde süresi dolacak evrakları dinamik uyarılarla
              ve filtrelenebilir tablolarla kullanıcıya sunar.
-             v1.5.0: Kişi evrak düzenleme/silme, tam kalıcılık (localStorage + disk)
+             v1.5.1: Mükerrer evrak kayıtlarında duplicate key hatası düzeltildi.
 Bağımlılıklar: streamlit, pandas, openpyxl, xlrd, plotly
 """
 
@@ -432,14 +432,13 @@ if "manuel_tarihler" not in st.session_state:
     val = ls_get("nitelik_manuel_tarihler", {})
     st.session_state["manuel_tarihler"] = val if val else {}
 
-# YENİ: evrak düzenlemeleri (override) ve silinmiş evraklar
 if "evrak_duzenlemeleri" not in st.session_state:
     val = ls_get("nitelik_evrak_duzenlemeleri", {})
-    st.session_state["evrak_duzenlemeleri"] = val if val else {}  # key: "Adı Soyadı|Evrak Adı" -> {"baslangic": date, "bitis": date} (JSON'da string)
+    st.session_state["evrak_duzenlemeleri"] = val if val else {}
 
 if "silinmis_evraklar" not in st.session_state:
     val = ls_get("nitelik_silinmis_evraklar", [])
-    st.session_state["silinmis_evraklar"] = val if val else []  # liste ["Adı Soyadı|Evrak Adı"]
+    st.session_state["silinmis_evraklar"] = val if val else []
 
 # ──────────────────────────────────────────────────────────────────────────────
 # SIDEBAR
@@ -500,7 +499,7 @@ with st.sidebar:
     st.markdown("---")
     st.markdown(
         "<div style='font-size:0.72rem;color:#4A7FA5;text-align:center;'>"
-        "v1.5.0 · Nitelik Belgesi Takip Sistemi<br>Streamlit + pandas + plotly"
+        "v1.5.1 · Nitelik Belgesi Takip Sistemi<br>Streamlit + pandas + plotly"
         "</div>", unsafe_allow_html=True,
     )
 
@@ -531,7 +530,8 @@ if df is None: st.stop()
 df = parse_dates(df)
 df = compute_remaining_days(df)
 df["Durum"] = df["Kalan Gün"].apply(get_status_label)
-df["Kaynak"] = "Excel"  # orijinal kaynağı işaretle
+df["Kaynak"] = "Excel"
+df["_key"] = df["Adı Soyadı"] + "|" + df["Evrak Adı"] + "_" + df.index.astype(str)
 
 # Ünvanları ekle
 def get_unvan(ad):
@@ -539,42 +539,38 @@ def get_unvan(ad):
 
 df["Ünvan"] = df["Adı Soyadı"].apply(get_unvan)
 
-# ── Orijinal + manuel birleştirme ve override/silme uygulama ─────────────────
+# ── Nihai DataFrame'i oluştur (silme, düzenleme, manuel ekleme) ─────────────
 def build_final_df(original_df):
-    # Orijinal DataFrame'i kopyala
     df_edit = original_df.copy()
     
-    # Önce silinmiş evrakları çıkar
+    # 1. Silinmiş evrakları çıkar
     silinecekler = set(st.session_state["silinmis_evraklar"])
     if silinecekler:
-        # Anahtar "Adı Soyadı|Evrak Adı" şeklinde
-        df_edit["_key"] = df_edit["Adı Soyadı"] + "|" + df_edit["Evrak Adı"]
         df_edit = df_edit[~df_edit["_key"].isin(silinecekler)]
-        df_edit = df_edit.drop(columns=["_key"])
     
-    # Evrak düzenlemelerini uygula (override)
+    # 2. Evrak düzenlemelerini uygula (override)
     for key, vals in st.session_state["evrak_duzenlemeleri"].items():
-        # key: "Adı Soyadı|Evrak Adı"
-        ad, evrak = key.split("|", 1)
-        mask = (df_edit["Adı Soyadı"] == ad) & (df_edit["Evrak Adı"] == evrak)
-        if mask.any():
-            if "baslangic" in vals and vals["baslangic"]:
-                try:
-                    df_edit.loc[mask, "Başlangıç Tarihi"] = datetime.datetime.strptime(vals["baslangic"], "%Y-%m-%d").date()
-                except: pass
-            if "bitis" in vals and vals["bitis"]:
-                try:
-                    df_edit.loc[mask, "Bitiş Tarihi"] = datetime.datetime.strptime(vals["bitis"], "%Y-%m-%d").date()
-                except: pass
-            # Kalan gün ve durumu yeniden hesapla
-            df_edit = compute_remaining_days(df_edit)
-            df_edit["Durum"] = df_edit["Kalan Gün"].apply(get_status_label)
+        # key formatı: "Adı Soyadı|Evrak Adı_45" gibi
+        if key not in df_edit["_key"].values:
+            continue
+        mask = df_edit["_key"] == key
+        if "baslangic" in vals and vals["baslangic"]:
+            try:
+                df_edit.loc[mask, "Başlangıç Tarihi"] = datetime.datetime.strptime(vals["baslangic"], "%Y-%m-%d").date()
+            except: pass
+        if "bitis" in vals and vals["bitis"]:
+            try:
+                df_edit.loc[mask, "Bitiş Tarihi"] = datetime.datetime.strptime(vals["bitis"], "%Y-%m-%d").date()
+            except: pass
+        # Kalan gün ve durumu yeniden hesapla
+        df_edit = compute_remaining_days(df_edit)
+        df_edit["Durum"] = df_edit["Kalan Gün"].apply(get_status_label)
     
-    # Manuel eklenen evrakları ekle (manuel_tarihler)
+    # 3. Manuel eklenen evrakları ekle
     manuel_rows = []
-    for (ad, evrak), vals in st.session_state["manuel_tarihler"].items():
-        # Bu evrak zaten silinmişler listesindeyse ekleme
-        if f"{ad}|{evrak}" in silinecekler:
+    for i, ((ad, evrak), vals) in enumerate(st.session_state["manuel_tarihler"].items()):
+        man_key = f"{ad}|{evrak}_manuel_{i}"
+        if man_key in silinecekler:
             continue
         bas = vals["baslangic"]
         bit = vals["bitis"]
@@ -588,6 +584,7 @@ def build_final_df(original_df):
             "Kalan Gün": (bit - today).days,
             "Durum": get_status_label((bit - today).days),
             "Kaynak": "Manuel",
+            "_key": man_key,
         })
     if manuel_rows:
         df_manuel = pd.DataFrame(manuel_rows)
@@ -598,7 +595,6 @@ def build_final_df(original_df):
 df_final = build_final_df(df)
 personel_listesi = sorted(df_final["Adı Soyadı"].dropna().unique().tolist())
 
-# Aylık filtreleme için df_month
 df_month = filter_by_month(df_final, sel_year, sel_month)
 df_display = df_month.copy()
 
@@ -613,7 +609,6 @@ tab_panel, tab_evrak, tab_kisi, tab_grafik = st.tabs(
 # SEKME 1 — EVRAK TAKİP PANELİ
 # ╚══════════════════════════════════════════════════════════════════════════════
 with tab_panel:
-    # Ünvan atama bölümü (öncekiyle aynı, sadece localStorage güncellemeleri korundu)
     atanmamis_sayisi = sum(
         1 for p in personel_listesi
         if st.session_state["unvan_map"].get(p,"— Atanmadı —") == "— Atanmadı —"
@@ -695,14 +690,12 @@ with tab_panel:
             ls_remove("nitelik_unvan_map")
             st.rerun()
 
-    # Ünvanları güncelle (final df'i yeniden oluştur)
     df_final["Ünvan"] = df_final["Adı Soyadı"].apply(get_unvan)
     df_month["Ünvan"] = df_month["Adı Soyadı"].apply(get_unvan)
     df_display["Ünvan"] = df_display["Adı Soyadı"].apply(get_unvan)
 
     st.markdown("<br>", unsafe_allow_html=True)
 
-    # Metrikler
     total_personel = df_final["Adı Soyadı"].nunique()
     total_evrak = len(df_final)
     ay_biten = len(df_month)
@@ -730,7 +723,6 @@ with tab_panel:
     if ay_biten == 0:
         st.markdown("<div class='alert-ok'>✅ Bu ay süresi dolacak evrak yok.</div>", unsafe_allow_html=True)
 
-    # Filtreler
     st.markdown("<div class='section-label'>🔍 Tablo Filtreleri</div>", unsafe_allow_html=True)
     fc1,fc2,fc3,fc4 = st.columns([3,2,2,2])
     with fc1: search_name = st.text_input("Personel adına göre ara", placeholder="örn. Ahmet")
@@ -888,13 +880,12 @@ with tab_evrak:
         st.markdown("</div>", unsafe_allow_html=True)
 
 # ╔══════════════════════════════════════════════════════════════════════════════
-# SEKME 3 — KİŞİ EVRAK DÜZENLE (YENİ)
+# SEKME 3 — KİŞİ EVRAK DÜZENLE (DÜZELTİLMİŞ)
 # ╚══════════════════════════════════════════════════════════════════════════════
 with tab_kisi:
     st.markdown("<div class='section-label'>✏️ Kişiye Ait Evrakları Düzenle / Sil</div>", unsafe_allow_html=True)
     secilen_kisi = st.selectbox("Personel seçin", ["(Seçin)"] + personel_listesi, key="kisi_sec")
     if secilen_kisi != "(Seçin)":
-        # Kişinin tüm evraklarını al (final df'den)
         kisi_df = df_final[df_final["Adı Soyadı"] == secilen_kisi].copy()
         if kisi_df.empty:
             st.info("Bu kişiye ait evrak bulunamadı.")
@@ -902,8 +893,8 @@ with tab_kisi:
             for idx, row in kisi_df.iterrows():
                 evrak_adi = row["Evrak Adı"]
                 kaynak = row["Kaynak"]
-                key_str = f"{secilen_kisi}|{evrak_adi}"
-                # Kart görünümü
+                # Benzersiz anahtar: _key sütunundaki değer (zaten DataFrame'de var)
+                key_str = row["_key"]
                 with st.container():
                     st.markdown("---")
                     col1, col2, col3 = st.columns([2,1,1])
@@ -924,13 +915,18 @@ with tab_kisi:
                                 ls_set("nitelik_silinmis_evraklar", silinenler)
                                 # Manuel evrak ise manuel_tarihler'den de sil
                                 if kaynak == "Manuel":
-                                    if (secilen_kisi, evrak_adi) in st.session_state["manuel_tarihler"]:
-                                        del st.session_state["manuel_tarihler"][(secilen_kisi, evrak_adi)]
-                                        ls_set("nitelik_manuel_tarihler", st.session_state["manuel_tarihler"])
+                                    # manuel key yapısından ad ve evrakı ayır
+                                    parts = key_str.rsplit("_manuel_", 1)
+                                    if len(parts) == 2:
+                                        ad_evrak = parts[0].split("|", 1)
+                                        if len(ad_evrak) == 2:
+                                            ad, evrak = ad_evrak
+                                            if (ad, evrak) in st.session_state["manuel_tarihler"]:
+                                                del st.session_state["manuel_tarihler"][(ad, evrak)]
+                                                ls_set("nitelik_manuel_tarihler", st.session_state["manuel_tarihler"])
                                 st.success(f"🗑 {evrak_adi} silindi.")
                                 st.rerun()
 
-                    # Düzenleme formu
                     if st.session_state.get(f"edit_mode_{key_str}", False):
                         with st.form(key=f"form_{key_str}"):
                             st.write(f"**{evrak_adi}** düzenleniyor")
@@ -939,7 +935,6 @@ with tab_kisi:
                             kaydet_duzenle = st.form_submit_button("Değişiklikleri Kaydet")
                             iptal = st.form_submit_button("İptal")
                             if kaydet_duzenle:
-                                # Düzenlemeyi kaydet
                                 duzenlemeler = st.session_state["evrak_duzenlemeleri"]
                                 duzenlemeler[key_str] = {
                                     "baslangic": yeni_bas.strftime("%Y-%m-%d"),
