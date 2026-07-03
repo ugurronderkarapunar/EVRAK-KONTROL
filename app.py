@@ -1,10 +1,8 @@
 """
 ⚓ Gemi Personeli Nitelik Belgesi Takip Sistemi
 ================================================
-Versiyon   : 1.6.0
-Açıklama   : v1.6.0: Sunucu tarafı JSON state, otomatik Excel kaydetme,
-             yedekleme, undo, personel özeti, e-posta uyarısı,
-             toplu ekleme, tarih formatı, sicil no arama.
+Versiyon   : 1.6.1
+Düzeltme   : Aylık bitiş grafiğindeki int() hatası giderildi.
 """
 
 import streamlit as st
@@ -99,7 +97,7 @@ hr { border-color: #1E3A52 !important; }
 """, unsafe_allow_html=True)
 
 # ──────────────────────────────────────────────────────────────────────────────
-# YARDIMCI FONKSİYONLAR (tarih, excel, state, yedek, e-posta ...)
+# YARDIMCI FONKSİYONLAR
 # ──────────────────────────────────────────────────────────────────────────────
 
 def get_month_range(year, month):
@@ -226,14 +224,12 @@ def backup_excel():
     timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
     backup_name = f"backup_{timestamp}.xlsx"
     shutil.copy2(SAVED_EXCEL_PATH, os.path.join(BACKUP_DIR, backup_name))
-    # Eski yedekleri temizle
     backups = sorted([f for f in os.listdir(BACKUP_DIR) if f.startswith("backup_")])
     while len(backups) > MAX_BACKUPS:
         os.remove(os.path.join(BACKUP_DIR, backups[0]))
         backups.pop(0)
 
 def save_state_and_excel():
-    """State'i JSON'a yaz, sonra Excel'i güncelle."""
     state = {
         "unvan_map": st.session_state["unvan_map"],
         "manuel_tarihler": {f"{k[0]}|{k[1]}": {"baslangic": v["baslangic"].strftime("%Y-%m-%d"),
@@ -244,15 +240,12 @@ def save_state_and_excel():
     }
     with open(STATE_FILE, "w", encoding="utf-8") as f:
         json.dump(state, f, ensure_ascii=False, indent=2)
-
-    # Yedek al ve yeni Excel'i yaz
     backup_excel()
-    df_final = build_final_df(df_original.copy())  # df_original global
+    df_final = build_final_df(df_original.copy())
     with pd.ExcelWriter(SAVED_EXCEL_PATH, engine="openpyxl") as writer:
         df_final.to_excel(writer, index=False, sheet_name="Evraklar")
 
 def push_undo():
-    """Son işlem için state yedekle."""
     st.session_state["undo_state"] = {
         "unvan_map": dict(st.session_state["unvan_map"]),
         "manuel_tarihler": dict(st.session_state["manuel_tarihler"]),
@@ -300,7 +293,6 @@ def load_state():
     if os.path.exists(STATE_FILE):
         with open(STATE_FILE, "r", encoding="utf-8") as f:
             data = json.load(f)
-        # Tarihleri datetime.date'e çevir
         manuel = {}
         for k, v in data.get("manuel_tarihler", {}).items():
             ad, evrak = k.split("|", 1)
@@ -325,7 +317,7 @@ if "undo_state" not in st.session_state:
     st.session_state["undo_state"] = None
 
 # ──────────────────────────────────────────────────────────────────────────────
-# SIDEBAR (Excel yükleme, ayarlar, SMTP, format)
+# SIDEBAR
 # ──────────────────────────────────────────────────────────────────────────────
 with st.sidebar:
     st.markdown("<div style='font-family:Syne;font-size:1.25rem;color:#F0C040;padding:8px 0;'>⚓ Belge Takip</div>", unsafe_allow_html=True)
@@ -386,11 +378,10 @@ with st.sidebar:
             st.error("SMTP bilgilerini doldurun.")
         else:
             with st.spinner("E‑posta gönderiliyor..."):
-                # df_final global olacak, henüz oluşmadıysa diye kontrol
-                if "df_final" not in st.session_state:
+                df = st.session_state.get("df_final")
+                if df is None:
                     st.warning("Önce Excel yükleyin.")
                 else:
-                    df = st.session_state["df_final"]
                     kritik = df[df["Durum"].isin(["🔴 Süresi Dolmuş", "🟠 Bu Hafta Bitiyor"])]
                     if kritik.empty:
                         st.info("Kritik evrak yok.")
@@ -407,7 +398,7 @@ with st.sidebar:
     st.markdown("---")
     if st.button("↩️ Son İşlemi Geri Al"):
         undo_last()
-    st.markdown("v1.6.0 · Tüm haklar açık.")
+    st.markdown("v1.6.1 · Tüm haklar açık.")
 
 # ──────────────────────────────────────────────────────────────────────────────
 # VERİ YÜKLEME VE HAZIRLIK
@@ -476,12 +467,10 @@ tab1, tab2, tab3, tab4, tab5 = st.tabs([
     "✏️ Kişi Evrak Düzenle", "👤 Personel Özeti", "📊 Grafikler & Analiz"
 ])
 
-# SEKME 1 – Evrak Takip Paneli (ünvan atama, metrikler, tablo)
+# SEKME 1 – Evrak Takip Paneli
 with tab1:
-    # Ünvan atama (öncekiyle aynı mantık, push_undo eklendi)
     atanmamis = sum(1 for p in personel_listesi if st.session_state["unvan_map"].get(p,"— Atanmadı —") == "— Atanmadı —")
     with st.expander(f"👤 Personel Ünvan Ataması ({len(personel_listesi)} kişi)", expanded=(atanmamis>0)):
-        # ... (içerik aynı, state değişikliklerinde push_undo() ve save_state_and_excel() çağrılı)
         st.markdown("**🎯 Seçili Kişilere Ünvan Ata**")
         sa1, sa2, sa3 = st.columns([3,2,2])
         with sa1:
@@ -513,7 +502,6 @@ with tab1:
                     save_state_and_excel()
                     st.rerun()
         st.markdown("---")
-        # Bireysel seçimler
         cols_per_row = 3
         for row_start in range(0, len(personel_listesi), cols_per_row):
             row_p = personel_listesi[row_start:row_start+cols_per_row]
@@ -533,7 +521,6 @@ with tab1:
             save_state_and_excel()
             st.rerun()
 
-    # Metrikler
     total_p = df_final["Adı Soyadı"].nunique()
     total_e = len(df_final)
     ay_biten = len(df_month)
@@ -546,11 +533,9 @@ with tab1:
     c4.metric("Süresi Dolmuş", dolmus)
     c5.metric("Bu Hafta Bitiyor", bu_hafta)
 
-    # Uyarılar
     if dolmus: st.markdown(f"<div class='alert-critical'>🚨 {dolmus} evrak süresi dolmuş!</div>", unsafe_allow_html=True)
     if bu_hafta: st.markdown(f"<div class='alert-warning'>⚠️ {bu_hafta} evrak bu hafta bitiyor.</div>", unsafe_allow_html=True)
 
-    # Filtreler (sicil no eklendi)
     st.markdown("<div class='section-label'>🔍 Filtreler</div>", unsafe_allow_html=True)
     fc1,fc2,fc3,fc4,fc5 = st.columns([2,2,2,2,2])
     with fc1: search_name = st.text_input("Ad ara")
@@ -599,7 +584,6 @@ with tab2:
         sec_p = st.selectbox("Personel", ["(Seçin)"]+personel_listesi, key="giris_p")
         if sec_p != "(Seçin)":
             mevcut_evraklar = sorted(df_final[df_final["Adı Soyadı"]==sec_p]["Evrak Adı"].dropna().unique().tolist())
-            # Yeni evrak eklemeye izin ver
             sec_e = st.selectbox("Evrak", ["(Yeni evrak yaz...)"]+mevcut_evraklar, key="giris_e")
             if sec_e == "(Yeni evrak yaz...)":
                 yeni_evrak = st.text_input("Evrak adını yazın")
@@ -646,7 +630,6 @@ with tab2:
                 st.rerun()
         st.markdown("</div>", unsafe_allow_html=True)
 
-    # Toplu ekleme
     st.markdown("---")
     st.markdown("**📎 Toplu Evrak Ekle (CSV/Excel)**")
     toplu_file = st.file_uploader("Dosya seç", type=["csv","xlsx","xls"], key="toplu")
@@ -738,7 +721,6 @@ with tab4:
         else:
             col1, col2 = st.columns(2)
             with col1:
-                # pasta
                 counts = df_kisi["Durum"].value_counts().reset_index()
                 counts.columns = ["Durum", "Adet"]
                 renkler = [DURUM_RENKLERI.get(d, "#95A5A6") for d in counts["Durum"]]
@@ -757,7 +739,7 @@ with tab4:
             st.dataframe(df_kisi[["Evrak Adı","Başlangıç Tarihi","Bitiş Tarihi","Kalan Gün","Durum"]]
                          .sort_values("Kalan Gün"), use_container_width=True)
 
-# SEKME 5 – Grafikler & Analiz
+# SEKME 5 – Grafikler & Analiz (HATA DÜZELTİLDİ)
 with tab5:
     st.markdown("<div class='section-label'>📊 Genel Analiz</div>", unsafe_allow_html=True)
     col1, col2 = st.columns(2)
@@ -770,15 +752,17 @@ with tab5:
         fig_pasta.update_layout(title="Tüm Evraklar", **PLOTLY_LAYOUT)
         st.plotly_chart(fig_pasta, use_container_width=True)
     with col2:
-        # aylık bitiş
+        # Aylık bitiş grafiği (hata düzeltildi)
         ay_labels, ay_counts = [], []
         for i in range(12):
             mo = today.month - 1 + i
             y, m = today.year + mo // 12, mo % 12 + 1
             fd, ld = get_month_range(y, m)
-            cnt = df_final["Bitiş Tarihi"].apply(lambda d: d is not None and fd <= d <= ld).sum()
+            cnt = df_final["Bitiş Tarihi"].apply(
+                lambda d: d is not None and fd <= d <= ld
+            ).sum()
             ay_labels.append(f"{calendar.month_abbr[m]}\n{y}")
-            ay_counts.append(cnt)
+            ay_counts.append(cnt)  # Artık int() çağrılmıyor
         fig_bar = go.Figure(go.Bar(x=ay_labels, y=ay_counts, marker_color="#2980B9"))
         fig_bar.update_layout(title="Aylık Bitiş Takvimi", **PLOTLY_LAYOUT)
         st.plotly_chart(fig_bar, use_container_width=True)
@@ -788,9 +772,10 @@ with tab5:
     ozet = pd.DataFrame({
         "Metrik": ["Toplam Evrak","Personel","Evrak Türü","Süresi Dolmuş","Bu Hafta","Bu Ay","3 Ay","Geçerli"],
         "Değer": [len(df_final), df_final["Adı Soyadı"].nunique(), df_final["Evrak Adı"].nunique(),
-                  int(df_final["Kalan Gün"]<0), int((df_final["Kalan Gün"]>=0)&(df_final["Kalan Gün"]<=7)),
-                  int((df_final["Kalan Gün"]>=0)&(df_final["Kalan Gün"]<=31)),
-                  int((df_final["Kalan Gün"]>=0)&(df_final["Kalan Gün"]<=90)),
-                  int(df_final["Kalan Gün"]>90)]
+                  int((df_final["Kalan Gün"] < 0).sum()),
+                  int(((df_final["Kalan Gün"] >= 0) & (df_final["Kalan Gün"] <= 7)).sum()),
+                  int(((df_final["Kalan Gün"] >= 0) & (df_final["Kalan Gün"] <= 31)).sum()),
+                  int(((df_final["Kalan Gün"] >= 0) & (df_final["Kalan Gün"] <= 90)).sum()),
+                  int((df_final["Kalan Gün"] > 90).sum())]
     })
     st.dataframe(ozet, use_container_width=True, hide_index=True)
