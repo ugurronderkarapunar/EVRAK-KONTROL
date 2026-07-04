@@ -1,8 +1,20 @@
 """
 ⚓ Gemi Personeli Nitelik Belgesi Takip Sistemi
 ================================================
-Versiyon   : 1.6.2
-Düzeltme   : Kişi Evrak Düzenleme'de otomatik bitiş hesaplama eklendi.
+Versiyon   : 1.7.0
+Düzeltmeler:
+  - _key artık satır sırasına (index) değil, Ad+Sicil+Evrak+Başlangıç hash'ine
+    dayanıyor. Excel yeniden yüklenip sıralaması değişse bile sil/düzenle
+    kayıtları doğru satırla eşleşmeye devam eder.
+  - Manuel kayıtlar artık benzersiz ID ile tutuluyor (ad/evrak adında "|" veya
+    "_manuel_" geçmesi durumunda oluşan eşleşme hatası giderildi).
+  - Toplu evrak yüklemede: boş (NaN) başlangıç tarihi artık "today" varsayılanını
+    gerçekten kullanıyor; Excel'den otomatik Timestamp olarak gelen geçerli bitiş
+    tarihleri artık yanlışlıkla otomatik hesaplamayla ezilmiyor.
+  - Excel dosyası artık `with open(...)` ile güvenli şekilde açılıp kapatılıyor.
+  - Ad/Sicil arama filtrelerinde boş hücre veya regex özel karakteri artık hata
+    vermiyor (na=False, regex=False).
+  - Zorunlu sütunlarda (Adı Soyadı / Evrak Adı) boş satırlar otomatik elenir.
 """
 
 import streamlit as st
@@ -13,6 +25,8 @@ import io
 import os
 import json
 import shutil
+import hashlib
+import uuid
 import smtplib
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
@@ -122,6 +136,8 @@ def is_saglik_belgesi(evrak_adi):
     return any(k in ad for k in SAGLIK_ANAHTAR_KELIMELER)
 
 def hesapla_bitis(baslangic, evrak_adi):
+    if hasattr(baslangic, "date") and not isinstance(baslangic, datetime.date):
+        baslangic = baslangic.date()
     yil = 2 if is_saglik_belgesi(evrak_adi) else 5
     try:
         return baslangic.replace(year=baslangic.year + yil)
@@ -175,6 +191,11 @@ def normalize_columns(df):
         return None
     for opt in ["Sicil No","Başlangıç Tarihi"]:
         if opt not in df.columns: df[opt] = "-"
+    # Zorunlu alanlarda boş satırları at (aksi halde ileride hash/concat hatası olur)
+    df = df.dropna(subset=["Adı Soyadı","Evrak Adı"]).copy()
+    df["Adı Soyadı"] = df["Adı Soyadı"].astype(str).str.strip()
+    df["Evrak Adı"] = df["Evrak Adı"].astype(str).str.strip()
+    df["Sicil No"] = df["Sicil No"].fillna("-").astype(str).str.strip()
     return df
 
 def parse_dates(df):
@@ -218,6 +239,13 @@ def format_date(d, fmt):
     if d is None: return "-"
     return d.strftime(fmt)
 
+def make_row_key(ad, sicil, evrak, baslangic):
+    """Satır sırasından (index) BAĞIMSIZ, kalıcı anahtar.
+    Excel yeniden yüklendiğinde / satırlar yer değiştirdiğinde bile
+    sil/düzenle kayıtları doğru satırla eşleşmeye devam eder."""
+    raw = f"{ad}|{sicil}|{evrak}|{baslangic}"
+    return "xl_" + hashlib.md5(raw.encode("utf-8")).hexdigest()
+
 def backup_excel():
     if not os.path.exists(SAVED_EXCEL_PATH): return
     os.makedirs(BACKUP_DIR, exist_ok=True)
@@ -232,9 +260,14 @@ def backup_excel():
 def save_state_and_excel():
     state = {
         "unvan_map": st.session_state["unvan_map"],
-        "manuel_tarihler": {f"{k[0]}|{k[1]}": {"baslangic": v["baslangic"].strftime("%Y-%m-%d"),
-                                                "bitis": v["bitis"].strftime("%Y-%m-%d")}
-                            for k, v in st.session_state["manuel_tarihler"].items()},
+        "manuel_kayitlar": {
+            mid: {
+                "ad": v["ad"], "evrak": v["evrak"],
+                "baslangic": v["baslangic"].strftime("%Y-%m-%d"),
+                "bitis": v["bitis"].strftime("%Y-%m-%d"),
+            }
+            for mid, v in st.session_state["manuel_kayitlar"].items()
+        },
         "evrak_duzenlemeleri": st.session_state["evrak_duzenlemeleri"],
         "silinmis_evraklar": st.session_state["silinmis_evraklar"],
     }
@@ -248,7 +281,7 @@ def save_state_and_excel():
 def push_undo():
     st.session_state["undo_state"] = {
         "unvan_map": dict(st.session_state["unvan_map"]),
-        "manuel_tarihler": dict(st.session_state["manuel_tarihler"]),
+        "manuel_kayitlar": {k: dict(v) for k, v in st.session_state["manuel_kayitlar"].items()},
         "evrak_duzenlemeleri": dict(st.session_state["evrak_duzenlemeleri"]),
         "silinmis_evraklar": list(st.session_state["silinmis_evraklar"]),
     }
@@ -256,7 +289,7 @@ def push_undo():
 def undo_last():
     if st.session_state.get("undo_state"):
         st.session_state["unvan_map"] = st.session_state["undo_state"]["unvan_map"]
-        st.session_state["manuel_tarihler"] = st.session_state["undo_state"]["manuel_tarihler"]
+        st.session_state["manuel_kayitlar"] = st.session_state["undo_state"]["manuel_kayitlar"]
         st.session_state["evrak_duzenlemeleri"] = st.session_state["undo_state"]["evrak_duzenlemeleri"]
         st.session_state["silinmis_evraklar"] = st.session_state["undo_state"]["silinmis_evraklar"]
         del st.session_state["undo_state"]
@@ -286,7 +319,7 @@ def send_email(smtp_config, subject, body):
 def load_state():
     default = {
         "unvan_map": {},
-        "manuel_tarihler": {},
+        "manuel_kayitlar": {},
         "evrak_duzenlemeleri": {},
         "silinmis_evraklar": [],
     }
@@ -294,21 +327,23 @@ def load_state():
         with open(STATE_FILE, "r", encoding="utf-8") as f:
             data = json.load(f)
         manuel = {}
-        for k, v in data.get("manuel_tarihler", {}).items():
-            ad, evrak = k.split("|", 1)
-            manuel[(ad, evrak)] = {
+        for mid, v in data.get("manuel_kayitlar", {}).items():
+            manuel[mid] = {
+                "ad": v["ad"], "evrak": v["evrak"],
                 "baslangic": datetime.datetime.strptime(v["baslangic"], "%Y-%m-%d").date(),
                 "bitis": datetime.datetime.strptime(v["bitis"], "%Y-%m-%d").date(),
             }
-        data["manuel_tarihler"] = manuel
+        data["manuel_kayitlar"] = manuel
+        for k in default:
+            data.setdefault(k, default[k])
         return data
     return default
 
 state = load_state()
 if "unvan_map" not in st.session_state:
     st.session_state["unvan_map"] = state["unvan_map"]
-if "manuel_tarihler" not in st.session_state:
-    st.session_state["manuel_tarihler"] = state["manuel_tarihler"]
+if "manuel_kayitlar" not in st.session_state:
+    st.session_state["manuel_kayitlar"] = state["manuel_kayitlar"]
 if "evrak_duzenlemeleri" not in st.session_state:
     st.session_state["evrak_duzenlemeleri"] = state["evrak_duzenlemeleri"]
 if "silinmis_evraklar" not in st.session_state:
@@ -398,7 +433,7 @@ with st.sidebar:
     st.markdown("---")
     if st.button("↩️ Son İşlemi Geri Al"):
         undo_last()
-    st.markdown("v1.6.2 · Tüm haklar açık.")
+    st.markdown("v1.7.0 · Tüm haklar açık.")
 
 # ──────────────────────────────────────────────────────────────────────────────
 # VERİ YÜKLEME VE HAZIRLIK
@@ -407,7 +442,8 @@ if not os.path.exists(SAVED_EXCEL_PATH):
     st.markdown("<div class='alert-info'>📂 Lütfen sol panelden bir Excel dosyası yükleyin.</div>", unsafe_allow_html=True)
     st.stop()
 
-df_raw = load_excel(open(SAVED_EXCEL_PATH, "rb"))
+with open(SAVED_EXCEL_PATH, "rb") as f:
+    df_raw = load_excel(f)
 if df_raw is None: st.stop()
 df = normalize_columns(df_raw)
 if df is None: st.stop()
@@ -415,7 +451,21 @@ df = parse_dates(df)
 df = compute_remaining_days(df)
 df["Durum"] = df["Kalan Gün"].apply(get_status_label)
 df["Kaynak"] = "Excel"
-df["_key"] = df["Adı Soyadı"] + "|" + df["Evrak Adı"] + "_" + df.index.astype(str)
+df["_key"] = df.apply(
+    lambda r: make_row_key(r["Adı Soyadı"], r["Sicil No"], r["Evrak Adı"], r["Başlangıç Tarihi"]),
+    axis=1,
+)
+# Aynı ad+sicil+evrak+başlangıç kombinasyonu birden fazla satırda varsa
+# (nadir de olsa) anahtar çakışmasını önlemek için sıra numarası ekle.
+dup_mask = df["_key"].duplicated(keep=False)
+if dup_mask.any():
+    dup_counter = {}
+    new_keys = []
+    for k in df["_key"]:
+        n = dup_counter.get(k, 0)
+        dup_counter[k] = n + 1
+        new_keys.append(k if n == 0 else f"{k}_{n}")
+    df["_key"] = new_keys
 
 def get_unvan(ad):
     return st.session_state["unvan_map"].get(ad, "— Atanmadı —")
@@ -428,27 +478,32 @@ def build_final_df(base_df):
     silinecekler = set(st.session_state["silinmis_evraklar"])
     if silinecekler:
         df_edit = df_edit[~df_edit["_key"].isin(silinecekler)]
+    değişti = False
     for key, vals in st.session_state["evrak_duzenlemeleri"].items():
         if key not in df_edit["_key"].values: continue
         mask = df_edit["_key"] == key
         if "baslangic" in vals and vals["baslangic"]:
-            try: df_edit.loc[mask, "Başlangıç Tarihi"] = datetime.datetime.strptime(vals["baslangic"], "%Y-%m-%d").date()
+            try:
+                df_edit.loc[mask, "Başlangıç Tarihi"] = datetime.datetime.strptime(vals["baslangic"], "%Y-%m-%d").date()
+                değişti = True
             except: pass
         if "bitis" in vals and vals["bitis"]:
-            try: df_edit.loc[mask, "Bitiş Tarihi"] = datetime.datetime.strptime(vals["bitis"], "%Y-%m-%d").date()
+            try:
+                df_edit.loc[mask, "Bitiş Tarihi"] = datetime.datetime.strptime(vals["bitis"], "%Y-%m-%d").date()
+                değişti = True
             except: pass
+    if değişti:
         df_edit = compute_remaining_days(df_edit)
         df_edit["Durum"] = df_edit["Kalan Gün"].apply(get_status_label)
     manuel_rows = []
-    for i, ((ad, evrak), vals) in enumerate(st.session_state["manuel_tarihler"].items()):
-        man_key = f"{ad}|{evrak}_manuel_{i}"
-        if man_key in silinecekler: continue
-        bas, bit = vals["baslangic"], vals["bitis"]
+    for mid, vals in st.session_state["manuel_kayitlar"].items():
+        if mid in silinecekler: continue
+        ad, evrak, bas, bit = vals["ad"], vals["evrak"], vals["baslangic"], vals["bitis"]
         manuel_rows.append({
             "Ünvan": get_unvan(ad), "Adı Soyadı": ad, "Sicil No": "-",
             "Evrak Adı": evrak, "Başlangıç Tarihi": bas, "Bitiş Tarihi": bit,
             "Kalan Gün": (bit - today).days, "Durum": get_status_label((bit - today).days),
-            "Kaynak": "Manuel", "_key": man_key,
+            "Kaynak": "Manuel", "_key": mid,
         })
     if manuel_rows:
         df_edit = pd.concat([df_edit, pd.DataFrame(manuel_rows)], ignore_index=True)
@@ -549,8 +604,10 @@ with tab1:
         sel_unvan_f = st.selectbox("Ünvan", ["(Hepsi)"] + UNVAN_LISTESI[1:])
 
     df_filt = df_month.copy()
-    if search_name.strip(): df_filt = df_filt[df_filt["Adı Soyadı"].str.contains(search_name.strip(), case=False)]
-    if search_sicil.strip(): df_filt = df_filt[df_filt["Sicil No"].astype(str).str.contains(search_sicil.strip())]
+    if search_name.strip():
+        df_filt = df_filt[df_filt["Adı Soyadı"].str.contains(search_name.strip(), case=False, na=False, regex=False)]
+    if search_sicil.strip():
+        df_filt = df_filt[df_filt["Sicil No"].astype(str).str.contains(search_sicil.strip(), na=False, regex=False)]
     if sel_evrak != "(Hepsi)": df_filt = df_filt[df_filt["Evrak Adı"] == sel_evrak]
     if sel_durum != "(Hepsi)": df_filt = df_filt[df_filt["Durum"] == sel_durum]
     if sel_unvan_f != "(Hepsi)": df_filt = df_filt[df_filt["Ünvan"] == sel_unvan_f]
@@ -592,32 +649,42 @@ with tab2:
             else:
                 yeni_evrak = sec_e
             if sec_e and sec_e != "(Yeni evrak yaz...)":
-                key_mt = (sec_p, sec_e)
-                mevcut_bas = st.session_state["manuel_tarihler"].get(key_mt, {}).get("baslangic")
+                mevcut_kayit = next(
+                    (v for v in st.session_state["manuel_kayitlar"].values()
+                     if v["ad"] == sec_p and v["evrak"] == sec_e),
+                    None,
+                )
+                mevcut_bas = mevcut_kayit["baslangic"] if mevcut_kayit else None
                 if mevcut_bas is None:
                     satir = df_final[(df_final["Adı Soyadı"]==sec_p)&(df_final["Evrak Adı"]==sec_e)]
-                    mevcut_bas = satir.iloc[0]["Başlangıç Tarihi"] if not satir.empty else today
+                    mevcut_bas = satir.iloc[0]["Başlangıç Tarihi"] if not satir.empty and satir.iloc[0]["Başlangıç Tarihi"] else today
                 tarih = st.date_input("Giriş/Yenileme Tarihi", value=mevcut_bas, format="DD.MM.YYYY")
                 sure = 2 if is_saglik_belgesi(sec_e) else 5
                 bitis = hesapla_bitis(tarih, sec_e)
                 st.success(f"Geçerlilik: {sure} yıl → Bitiş: {bitis.strftime('%d.%m.%Y')}")
                 if st.button("💾 Kaydet"):
                     push_undo()
-                    st.session_state["manuel_tarihler"][key_mt] = {"baslangic": tarih, "bitis": bitis}
+                    if mevcut_kayit is not None:
+                        mid_existing = next(k for k, v in st.session_state["manuel_kayitlar"].items()
+                                             if v["ad"] == sec_p and v["evrak"] == sec_e)
+                        st.session_state["manuel_kayitlar"][mid_existing] = {"ad": sec_p, "evrak": sec_e, "baslangic": tarih, "bitis": bitis}
+                    else:
+                        mid = "man_" + uuid.uuid4().hex[:12]
+                        st.session_state["manuel_kayitlar"][mid] = {"ad": sec_p, "evrak": sec_e, "baslangic": tarih, "bitis": bitis}
                     save_state_and_excel()
                     st.rerun()
         st.markdown("</div>", unsafe_allow_html=True)
     with col_b:
         st.markdown("<div class='card-box'>", unsafe_allow_html=True)
         st.markdown("**📋 Manuel Kayıtlar**")
-        if not st.session_state["manuel_tarihler"]:
+        if not st.session_state["manuel_kayitlar"]:
             st.info("Henüz manuel kayıt yok.")
         else:
             mt_rows = []
-            for (ad, evrak), vals in st.session_state["manuel_tarihler"].items():
+            for mid, vals in st.session_state["manuel_kayitlar"].items():
                 kalan = (vals["bitis"] - today).days
                 mt_rows.append({
-                    "Personel": ad, "Evrak": evrak,
+                    "Personel": vals["ad"], "Evrak": vals["evrak"],
                     "Başlangıç": vals["baslangic"].strftime(fmt),
                     "Bitiş": vals["bitis"].strftime(fmt),
                     "Kalan Gün": kalan, "Durum": get_status_label(kalan)
@@ -625,7 +692,7 @@ with tab2:
             st.dataframe(pd.DataFrame(mt_rows).sort_values("Kalan Gün"), use_container_width=True, hide_index=True)
             if st.button("🗑 Manuel kayıtları sıfırla"):
                 push_undo()
-                st.session_state["manuel_tarihler"] = {}
+                st.session_state["manuel_kayitlar"] = {}
                 save_state_and_excel()
                 st.rerun()
         st.markdown("</div>", unsafe_allow_html=True)
@@ -641,22 +708,47 @@ with tab2:
                 st.dataframe(df_toplu.head())
                 if st.button("✅ Bu kayıtları ekle"):
                     push_undo()
+                    eklenen, atlanan = 0, 0
                     for _, row in df_toplu.iterrows():
                         ad = row["Adı Soyadı"]
                         evrak = row["Evrak Adı"]
-                        bas = row.get("Başlangıç Tarihi", today)
-                        if isinstance(bas, str): bas = datetime.datetime.strptime(bas, "%d.%m.%Y").date()
-                        bitis = row.get("Bitiş Tarihi")
-                        if isinstance(bitis, str) and bitis not in ("","-"):
-                            bitis = datetime.datetime.strptime(bitis, "%d.%m.%Y").date()
+
+                        bas_raw = row.get("Başlangıç Tarihi")
+                        if pd.isna(bas_raw) if not isinstance(bas_raw, str) else bas_raw.strip() in ("", "-", "nan"):
+                            bas = today
+                        elif isinstance(bas_raw, str):
+                            parsed = pd.to_datetime(bas_raw, dayfirst=True, errors="coerce")
+                            bas = parsed.date() if pd.notna(parsed) else today
+                        elif hasattr(bas_raw, "date"):
+                            bas = bas_raw.date()
                         else:
+                            bas = bas_raw
+
+                        bitis_raw = row.get("Bitiş Tarihi")
+                        bitis_bos = (pd.isna(bitis_raw) if not isinstance(bitis_raw, str)
+                                     else bitis_raw.strip() in ("", "-", "nan"))
+                        if bitis_bos:
                             bitis = hesapla_bitis(bas, evrak)
-                        st.session_state["manuel_tarihler"][(ad, evrak)] = {"baslangic": bas, "bitis": bitis}
+                        elif isinstance(bitis_raw, str):
+                            parsed = pd.to_datetime(bitis_raw, dayfirst=True, errors="coerce")
+                            bitis = parsed.date() if pd.notna(parsed) else hesapla_bitis(bas, evrak)
+                        elif hasattr(bitis_raw, "date"):
+                            bitis = bitis_raw.date()
+                        else:
+                            bitis = bitis_raw
+
+                        if not ad or not evrak or str(ad).strip() in ("", "nan") or str(evrak).strip() in ("", "nan"):
+                            atlanan += 1
+                            continue
+
+                        mid = "man_" + uuid.uuid4().hex[:12]
+                        st.session_state["manuel_kayitlar"][mid] = {"ad": ad, "evrak": evrak, "baslangic": bas, "bitis": bitis}
+                        eklenen += 1
                     save_state_and_excel()
-                    st.success("Toplu kayıt eklendi.")
+                    st.success(f"{eklenen} kayıt eklendi." + (f" {atlanan} satır eksik veri nedeniyle atlandı." if atlanan else ""))
                     st.rerun()
 
-# SEKME 3 – Kişi Evrak Düzenle / Sil (Otomatik hesaplama eklendi)
+# SEKME 3 – Kişi Evrak Düzenle / Sil
 with tab3:
     st.markdown("<div class='section-label'>✏️ Kişi Evrak Düzenle / Sil</div>", unsafe_allow_html=True)
     sec_kisi = st.selectbox("Personel", ["(Seçin)"]+personel_listesi, key="kisi_duz")
@@ -670,21 +762,17 @@ with tab3:
                 with col1:
                     st.markdown(f"**{row['Evrak Adı']}** ({row['Kaynak']})")
                     st.caption(f"Başlangıç: {format_date(row['Başlangıç Tarihi'], fmt)} | Bitiş: {format_date(row['Bitiş Tarihi'], fmt)}")
-                    st.caption(f"Kalan: {int(row['Kalan Gün']) if row['Kalan Gün'] else '-'} | Durum: {row['Durum']}")
+                    st.caption(f"Kalan: {int(row['Kalan Gün']) if row['Kalan Gün'] is not None else '-'} | Durum: {row['Durum']}")
                 with col2:
                     if st.button("✏️ Düzenle", key=f"duz_{key_str}"):
                         st.session_state[f"edit_{key_str}"] = True
                 with col3:
                     if st.button("🗑 Sil", key=f"sil_{key_str}"):
                         push_undo()
-                        st.session_state["silinmis_evraklar"].append(key_str)
                         if row["Kaynak"] == "Manuel":
-                            parts = key_str.rsplit("_manuel_",1)
-                            if len(parts)==2:
-                                ad_evrak = parts[0].split("|",1)
-                                if len(ad_evrak)==2:
-                                    ad, evrak = ad_evrak
-                                    st.session_state["manuel_tarihler"].pop((ad, evrak), None)
+                            st.session_state["manuel_kayitlar"].pop(key_str, None)
+                        else:
+                            st.session_state["silinmis_evraklar"].append(key_str)
                         save_state_and_excel()
                         st.rerun()
                 if st.session_state.get(f"edit_{key_str}"):
@@ -711,10 +799,16 @@ with tab3:
                         if kaydet_duzenle:
                             push_undo()
                             final_bitis = hesapla_bitis(ybas, row["Evrak Adı"]) if otomatik_hesapla else ybit
-                            st.session_state["evrak_duzenlemeleri"][key_str] = {
-                                "baslangic": ybas.strftime("%Y-%m-%d"),
-                                "bitis": final_bitis.strftime("%Y-%m-%d") if hasattr(final_bitis, 'strftime') else ybit.strftime("%Y-%m-%d")
-                            }
+                            if row["Kaynak"] == "Manuel":
+                                st.session_state["manuel_kayitlar"][key_str] = {
+                                    "ad": row["Adı Soyadı"], "evrak": row["Evrak Adı"],
+                                    "baslangic": ybas, "bitis": final_bitis,
+                                }
+                            else:
+                                st.session_state["evrak_duzenlemeleri"][key_str] = {
+                                    "baslangic": ybas.strftime("%Y-%m-%d"),
+                                    "bitis": final_bitis.strftime("%Y-%m-%d"),
+                                }
                             save_state_and_excel()
                             st.session_state[f"edit_{key_str}"] = False
                             st.rerun()
