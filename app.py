@@ -325,22 +325,44 @@ def send_whatsapp_callmebot(phone, apikey, message):
     except Exception as e:
         return False, str(e)
 
-def build_kritik_mesaji(df):
+def build_kritik_mesaji(df, max_chars=1200):
     dolmus_df = df[df["Durum"] == "🔴 Süresi Dolmuş"].sort_values("Kalan Gün")
     hafta_df = df[df["Durum"] == "🟠 Bu Hafta Bitiyor"].sort_values("Kalan Gün")
     if dolmus_df.empty and hafta_df.empty:
         return None
-    satirlar = ["⚓ *Belge Takip Uyarısı*", f"({datetime.date.today().strftime('%d.%m.%Y')})", ""]
-    if not dolmus_df.empty:
-        satirlar.append(f"🔴 SÜRESİ DOLMUŞ ({len(dolmus_df)}):")
-        for _, r in dolmus_df.iterrows():
+
+    satirlar = [
+        "⚓ Belge Takip Uyarısı",
+        f"({datetime.date.today().strftime('%d.%m.%Y')})",
+        f"Toplam: {len(dolmus_df)} süresi dolmuş, {len(hafta_df)} bu hafta bitiyor",
+        "",
+    ]
+
+    def ekle(baslik, alt_df):
+        satirlar.append(baslik)
+        for _, r in alt_df.iterrows():
             satirlar.append(f"- {r['Adı Soyadı']} / {r['Evrak Adı']} ({format_date(r['Bitiş Tarihi'], '%d.%m.%Y')})")
         satirlar.append("")
+
+    if not dolmus_df.empty:
+        ekle(f"🔴 SÜRESİ DOLMUŞ ({len(dolmus_df)}):", dolmus_df)
     if not hafta_df.empty:
-        satirlar.append(f"🟠 BU HAFTA BİTİYOR ({len(hafta_df)}):")
-        for _, r in hafta_df.iterrows():
-            satirlar.append(f"- {r['Adı Soyadı']} / {r['Evrak Adı']} ({format_date(r['Bitiş Tarihi'], '%d.%m.%Y')})")
-    return "\n".join(satirlar)
+        ekle(f"🟠 BU HAFTA BİTİYOR ({len(hafta_df)}):", hafta_df)
+
+    mesaj = "\n".join(satirlar).strip()
+
+    # CallMeBot / WhatsApp URL uzunluk sınırı nedeniyle mesajı kısalt.
+    if len(mesaj) > max_chars:
+        kirpik = mesaj[:max_chars]
+        son_satir = kirpik.rfind("\n")
+        if son_satir > 0:
+            kirpik = kirpik[:son_satir]
+        toplam_satir = len(dolmus_df) + len(hafta_df)
+        gosterilen = kirpik.count("\n- ")
+        kalan = max(toplam_satir - gosterilen, 0)
+        mesaj = kirpik + f"\n... ve {kalan} kayıt daha.\nDetay için uygulamayı aç."
+
+    return mesaj
 
 def send_email(smtp_config, subject, body):
     try:
