@@ -27,6 +27,7 @@ import json
 import shutil
 import hashlib
 import uuid
+import time
 import urllib.parse
 import requests
 import smtplib
@@ -325,30 +326,15 @@ def send_whatsapp_callmebot(phone, apikey, message):
     except Exception as e:
         return False, str(e)
 
-def build_kritik_mesaji(df, max_chars=1200):
-    dolmus_df = df[df["Durum"] == "🔴 Süresi Dolmuş"].sort_values("Kalan Gün")
-    hafta_df = df[df["Durum"] == "🟠 Bu Hafta Bitiyor"].sort_values("Kalan Gün")
-    if dolmus_df.empty and hafta_df.empty:
-        return None
-
+def _mesaj_govdesi_olustur(baslik, alt_df, max_chars):
     satirlar = [
-        "⚓ Belge Takip Uyarısı",
+        baslik,
         f"({datetime.date.today().strftime('%d.%m.%Y')})",
-        f"Toplam: {len(dolmus_df)} süresi dolmuş, {len(hafta_df)} bu hafta bitiyor",
+        f"Toplam: {len(alt_df)} kayıt",
         "",
     ]
-
-    def ekle(baslik, alt_df):
-        satirlar.append(baslik)
-        for _, r in alt_df.iterrows():
-            satirlar.append(f"- {r['Adı Soyadı']} / {r['Evrak Adı']} ({format_date(r['Bitiş Tarihi'], '%d.%m.%Y')})")
-        satirlar.append("")
-
-    if not dolmus_df.empty:
-        ekle(f"🔴 SÜRESİ DOLMUŞ ({len(dolmus_df)}):", dolmus_df)
-    if not hafta_df.empty:
-        ekle(f"🟠 BU HAFTA BİTİYOR ({len(hafta_df)}):", hafta_df)
-
+    for _, r in alt_df.iterrows():
+        satirlar.append(f"- {r['Adı Soyadı']} / {r['Evrak Adı']} ({format_date(r['Bitiş Tarihi'], '%d.%m.%Y')})")
     mesaj = "\n".join(satirlar).strip()
 
     # CallMeBot / WhatsApp URL uzunluk sınırı nedeniyle mesajı kısalt.
@@ -357,12 +343,20 @@ def build_kritik_mesaji(df, max_chars=1200):
         son_satir = kirpik.rfind("\n")
         if son_satir > 0:
             kirpik = kirpik[:son_satir]
-        toplam_satir = len(dolmus_df) + len(hafta_df)
         gosterilen = kirpik.count("\n- ")
-        kalan = max(toplam_satir - gosterilen, 0)
+        kalan = max(len(alt_df) - gosterilen, 0)
         mesaj = kirpik + f"\n... ve {kalan} kayıt daha.\nDetay için uygulamayı aç."
-
     return mesaj
+
+def build_iki_kritik_mesaj(df, max_chars=1200):
+    """Süresi dolmuş ve bu hafta bitecek evraklar için ayrı ayrı iki mesaj üretir.
+    Dönüş: (mesaj_dolmus veya None, mesaj_hafta veya None)"""
+    dolmus_df = df[df["Durum"] == "🔴 Süresi Dolmuş"].sort_values("Kalan Gün")
+    hafta_df = df[df["Durum"] == "🟠 Bu Hafta Bitiyor"].sort_values("Kalan Gün")
+
+    mesaj_dolmus = _mesaj_govdesi_olustur("🔴 SÜRESİ DOLMUŞ EVRAKLAR", dolmus_df, max_chars) if not dolmus_df.empty else None
+    mesaj_hafta = _mesaj_govdesi_olustur("🟠 1 HAFTA İÇİNDE BİTECEK EVRAKLAR", hafta_df, max_chars) if not hafta_df.empty else None
+    return mesaj_dolmus, mesaj_hafta
 
 def send_email(smtp_config, subject, body):
     try:
@@ -536,12 +530,22 @@ with st.sidebar:
             elif not wa_phone or not wa_apikey:
                 st.error("Telefon ve API key gerekli.")
             else:
-                mesaj = build_kritik_mesaji(df_test) or "⚓ Belge Takip: şu an kritik durumda evrak yok. (Test mesajı)"
-                ok, resp = send_whatsapp_callmebot(wa_phone, wa_apikey, mesaj)
-                if ok:
-                    st.success("WhatsApp mesajı gönderildi.")
+                mesaj_dolmus, mesaj_hafta = build_iki_kritik_mesaj(df_test)
+                if mesaj_dolmus is None and mesaj_hafta is None:
+                    ok, resp = send_whatsapp_callmebot(
+                        wa_phone, wa_apikey,
+                        "⚓ Belge Takip: şu an kritik durumda evrak yok. (Test mesajı)"
+                    )
+                    if ok: st.success("Test mesajı gönderildi (kritik evrak yok).")
+                    else: st.error(f"Gönderilemedi: {resp}")
                 else:
-                    st.error(f"Gönderilemedi: {resp}")
+                    if mesaj_dolmus:
+                        ok1, resp1 = send_whatsapp_callmebot(wa_phone, wa_apikey, mesaj_dolmus)
+                        st.success("1/2 gönderildi: Süresi dolmuş evraklar.") if ok1 else st.error(f"1/2 gönderilemedi: {resp1}")
+                    if mesaj_hafta:
+                        time.sleep(1)  # CallMeBot art arda isteklerde bazen sınırlıyor
+                        ok2, resp2 = send_whatsapp_callmebot(wa_phone, wa_apikey, mesaj_hafta)
+                        st.success("2/2 gönderildi: Bu hafta bitecek evraklar.") if ok2 else st.error(f"2/2 gönderilemedi: {resp2}")
 
     st.markdown("---")
     if st.button("↩️ Son İşlemi Geri Al"):
@@ -630,11 +634,17 @@ wa_cfg = st.session_state.get("whatsapp_config", {})
 if wa_cfg.get("oto_gonder") and wa_cfg.get("phone") and wa_cfg.get("apikey"):
     bugun_str = today.strftime("%Y-%m-%d")
     if st.session_state.get("son_whatsapp_gonderim") != bugun_str:
-        mesaj = build_kritik_mesaji(df_final)
-        if mesaj:
-            ok, _ = send_whatsapp_callmebot(wa_cfg["phone"], wa_cfg["apikey"], mesaj)
-            if ok:
-                st.toast("📲 Kritik evrak uyarısı WhatsApp'a gönderildi.")
+        mesaj_dolmus, mesaj_hafta = build_iki_kritik_mesaj(df_final)
+        gonderildi = False
+        if mesaj_dolmus:
+            ok, _ = send_whatsapp_callmebot(wa_cfg["phone"], wa_cfg["apikey"], mesaj_dolmus)
+            gonderildi = gonderildi or ok
+        if mesaj_hafta:
+            time.sleep(1)
+            ok, _ = send_whatsapp_callmebot(wa_cfg["phone"], wa_cfg["apikey"], mesaj_hafta)
+            gonderildi = gonderildi or ok
+        if gonderildi:
+            st.toast("📲 Kritik evrak uyarıları WhatsApp'a gönderildi.")
         st.session_state["son_whatsapp_gonderim"] = bugun_str
         save_state_and_excel()
 
