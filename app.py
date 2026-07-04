@@ -204,11 +204,14 @@ def parse_dates(df):
     def parse_one(val):
         if pd.isna(val) or str(val).strip() in ("","nan","None","-"): return None
         s = str(val).strip()
-        p = pd.to_datetime(s, dayfirst=True, errors="coerce")
-        if pd.notna(p): return p.date()
         for fmt in ["%d.%m.%Y","%d/%m/%Y","%Y-%m-%d","%d.%m.%y"]:
             try: return datetime.datetime.strptime(s, fmt).date()
             except: pass
+        import warnings
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            p = pd.to_datetime(s, dayfirst=True, errors="coerce")
+        if pd.notna(p): return p.date()
         return None
     for col in ["Bitiş Tarihi","Başlangıç Tarihi"]:
         if col in df.columns: df[col] = df[col].apply(parse_one)
@@ -259,7 +262,10 @@ def backup_excel():
         os.remove(os.path.join(BACKUP_DIR, backups[0]))
         backups.pop(0)
 
-def save_state_and_excel():
+def save_state_json():
+    """Sadece ayarları/kayıtları state.json'a yazar. Excel'i yeniden üretmez,
+    bu yüzden henüz Excel yüklenmemişken (örn. WhatsApp ayarları kaydedilirken)
+    de güvenle çağrılabilir."""
     state = {
         "unvan_map": st.session_state["unvan_map"],
         "manuel_kayitlar": {
@@ -277,10 +283,15 @@ def save_state_and_excel():
     }
     with open(STATE_FILE, "w", encoding="utf-8") as f:
         json.dump(state, f, ensure_ascii=False, indent=2)
+
+def save_state_and_excel():
+    """Ayarları kaydeder VE Excel'i yeniden üretir. Sadece Excel zaten
+    yüklenmişken (df_original tanımlıyken) çağrılmalıdır."""
+    save_state_json()
     backup_excel()
-    df_final = build_final_df(df_original.copy())
+    df_final_local = build_final_df(df_original.copy())
     with pd.ExcelWriter(SAVED_EXCEL_PATH, engine="openpyxl") as writer:
-        df_final.to_excel(writer, index=False, sheet_name="Evraklar")
+        df_final_local.to_excel(writer, index=False, sheet_name="Evraklar")
 
 def push_undo():
     st.session_state["undo_state"] = {
@@ -493,7 +504,7 @@ with st.sidebar:
         )
         if st.button("💾 WhatsApp Ayarlarını Kaydet"):
             st.session_state["whatsapp_config"] = {"phone": wa_phone, "apikey": wa_apikey, "oto_gonder": wa_oto}
-            save_state_and_excel()
+            save_state_json()
             st.success("Kaydedildi.")
 
         if st.button("📲 Şimdi Test Gönder"):
