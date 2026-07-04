@@ -27,6 +27,8 @@ import json
 import shutil
 import hashlib
 import uuid
+import urllib.parse
+import requests
 import smtplib
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
@@ -270,6 +272,8 @@ def save_state_and_excel():
         },
         "evrak_duzenlemeleri": st.session_state["evrak_duzenlemeleri"],
         "silinmis_evraklar": st.session_state["silinmis_evraklar"],
+        "whatsapp_config": st.session_state["whatsapp_config"],
+        "son_whatsapp_gonderim": st.session_state["son_whatsapp_gonderim"],
     }
     with open(STATE_FILE, "w", encoding="utf-8") as f:
         json.dump(state, f, ensure_ascii=False, indent=2)
@@ -295,6 +299,37 @@ def undo_last():
         del st.session_state["undo_state"]
         save_state_and_excel()
         st.rerun()
+
+def send_whatsapp_callmebot(phone, apikey, message):
+    """CallMeBot üzerinden ücretsiz WhatsApp mesajı gönderir.
+    Kurulum: CallMeBot numarasını (+34 644 44 92 07) rehbere ekleyip
+    WhatsApp'tan 'I allow callmebot to send me messages' yazman gerekir,
+    ardından sana bir apikey gelir."""
+    try:
+        phone_clean = phone.strip().replace(" ", "").replace("+", "")
+        url = (f"https://api.callmebot.com/whatsapp.php?phone={phone_clean}"
+               f"&text={urllib.parse.quote(message)}&apikey={apikey.strip()}")
+        r = requests.get(url, timeout=15)
+        return (r.status_code == 200), r.text
+    except Exception as e:
+        return False, str(e)
+
+def build_kritik_mesaji(df):
+    dolmus_df = df[df["Durum"] == "🔴 Süresi Dolmuş"].sort_values("Kalan Gün")
+    hafta_df = df[df["Durum"] == "🟠 Bu Hafta Bitiyor"].sort_values("Kalan Gün")
+    if dolmus_df.empty and hafta_df.empty:
+        return None
+    satirlar = ["⚓ *Belge Takip Uyarısı*", f"({datetime.date.today().strftime('%d.%m.%Y')})", ""]
+    if not dolmus_df.empty:
+        satirlar.append(f"🔴 SÜRESİ DOLMUŞ ({len(dolmus_df)}):")
+        for _, r in dolmus_df.iterrows():
+            satirlar.append(f"- {r['Adı Soyadı']} / {r['Evrak Adı']} ({format_date(r['Bitiş Tarihi'], '%d.%m.%Y')})")
+        satirlar.append("")
+    if not hafta_df.empty:
+        satirlar.append(f"🟠 BU HAFTA BİTİYOR ({len(hafta_df)}):")
+        for _, r in hafta_df.iterrows():
+            satirlar.append(f"- {r['Adı Soyadı']} / {r['Evrak Adı']} ({format_date(r['Bitiş Tarihi'], '%d.%m.%Y')})")
+    return "\n".join(satirlar)
 
 def send_email(smtp_config, subject, body):
     try:
@@ -322,6 +357,8 @@ def load_state():
         "manuel_kayitlar": {},
         "evrak_duzenlemeleri": {},
         "silinmis_evraklar": [],
+        "whatsapp_config": {"phone": "", "apikey": "", "oto_gonder": False},
+        "son_whatsapp_gonderim": None,
     }
     if os.path.exists(STATE_FILE):
         with open(STATE_FILE, "r", encoding="utf-8") as f:
@@ -350,6 +387,10 @@ if "silinmis_evraklar" not in st.session_state:
     st.session_state["silinmis_evraklar"] = state["silinmis_evraklar"]
 if "undo_state" not in st.session_state:
     st.session_state["undo_state"] = None
+if "whatsapp_config" not in st.session_state:
+    st.session_state["whatsapp_config"] = state.get("whatsapp_config", {"phone": "", "apikey": "", "oto_gonder": False})
+if "son_whatsapp_gonderim" not in st.session_state:
+    st.session_state["son_whatsapp_gonderim"] = state.get("son_whatsapp_gonderim")
 
 # ──────────────────────────────────────────────────────────────────────────────
 # SIDEBAR
@@ -431,9 +472,48 @@ with st.sidebar:
                             st.error("E‑posta gönderilemedi.")
 
     st.markdown("---")
+    st.markdown("<div class='section-label'>📱 WhatsApp Uyarısı (Ücretsiz)</div>", unsafe_allow_html=True)
+    with st.expander("CallMeBot Ayarları", expanded=not st.session_state["whatsapp_config"].get("apikey")):
+        st.caption(
+            "1) WhatsApp rehberine **+34 644 44 92 07** (CallMeBot) ekle.\n\n"
+            "2) O numaraya şu mesajı gönder: *I allow callmebot to send me messages*\n\n"
+            "3) Gelen apikey'i aşağıya yaz."
+        )
+        wa_phone = st.text_input(
+            "Telefon (ülke koduyla, örn: 905551234567)",
+            value=st.session_state["whatsapp_config"].get("phone", ""),
+        )
+        wa_apikey = st.text_input(
+            "CallMeBot API Key",
+            value=st.session_state["whatsapp_config"].get("apikey", ""),
+        )
+        wa_oto = st.checkbox(
+            "Uygulama her açıldığında günde 1 kez otomatik gönder",
+            value=st.session_state["whatsapp_config"].get("oto_gonder", False),
+        )
+        if st.button("💾 WhatsApp Ayarlarını Kaydet"):
+            st.session_state["whatsapp_config"] = {"phone": wa_phone, "apikey": wa_apikey, "oto_gonder": wa_oto}
+            save_state_and_excel()
+            st.success("Kaydedildi.")
+
+        if st.button("📲 Şimdi Test Gönder"):
+            df_test = st.session_state.get("df_final")
+            if df_test is None:
+                st.warning("Önce Excel yükleyin.")
+            elif not wa_phone or not wa_apikey:
+                st.error("Telefon ve API key gerekli.")
+            else:
+                mesaj = build_kritik_mesaji(df_test) or "⚓ Belge Takip: şu an kritik durumda evrak yok. (Test mesajı)"
+                ok, resp = send_whatsapp_callmebot(wa_phone, wa_apikey, mesaj)
+                if ok:
+                    st.success("WhatsApp mesajı gönderildi.")
+                else:
+                    st.error(f"Gönderilemedi: {resp}")
+
+    st.markdown("---")
     if st.button("↩️ Son İşlemi Geri Al"):
         undo_last()
-    st.markdown("v1.7.0 · Tüm haklar açık.")
+    st.markdown("v1.8.0 · Tüm haklar açık.")
 
 # ──────────────────────────────────────────────────────────────────────────────
 # VERİ YÜKLEME VE HAZIRLIK
@@ -511,6 +591,20 @@ def build_final_df(base_df):
 
 df_final = build_final_df(df_original)
 st.session_state["df_final"] = df_final
+
+# Günde 1 kez otomatik WhatsApp uyarısı (kritik evrak varsa)
+wa_cfg = st.session_state.get("whatsapp_config", {})
+if wa_cfg.get("oto_gonder") and wa_cfg.get("phone") and wa_cfg.get("apikey"):
+    bugun_str = today.strftime("%Y-%m-%d")
+    if st.session_state.get("son_whatsapp_gonderim") != bugun_str:
+        mesaj = build_kritik_mesaji(df_final)
+        if mesaj:
+            ok, _ = send_whatsapp_callmebot(wa_cfg["phone"], wa_cfg["apikey"], mesaj)
+            if ok:
+                st.toast("📲 Kritik evrak uyarısı WhatsApp'a gönderildi.")
+        st.session_state["son_whatsapp_gonderim"] = bugun_str
+        save_state_and_excel()
+
 personel_listesi = sorted(df_final["Adı Soyadı"].dropna().unique().tolist())
 df_month = filter_by_month(df_final, sel_year, sel_month)
 
